@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.4 — Redaction preview
+
+- Replace adjacent words as complete Lorem lines with one baseline, height, color, and horizontal scale, instead of fitting every replacement word to a separate OCR box.
+- Join aligned OCR fragments, keep paragraph rows separate, and split large gaps between columns or independent labels.
+- Keep line content stable in the one-time prepared image shared by both Lorem modes; moving and resizing effects still preserves the original outside the selected area.
+
 ## 1.18.3 — Redaction preview
 
 - Fix low-strength Gaussian blur appearing horizontal and abruptly changing near the first quarter of the slider, in both Gaussian modes.

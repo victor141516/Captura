@@ -71,6 +71,74 @@ struct Replacement {
     ARGB background, color;
     std::wstring text;
 };
+std::vector<OcrWord> textRuns(const OcrReport& report) {
+    struct Row {
+        RectF bounds;
+        std::vector<const OcrWord*> words;
+    };
+    std::vector<const OcrWord*> words;
+    for (const auto& line : report.lines)
+        for (const auto& word : line.words)
+            if (!word.text.empty() && word.bounds.Width > 0 && word.bounds.Height > 0)
+                words.push_back(&word);
+    std::stable_sort(words.begin(), words.end(), [](const OcrWord* a, const OcrWord* b) {
+        return a->bounds.Y + a->bounds.Height / 2 < b->bounds.Y + b->bounds.Height / 2;
+    });
+    auto unite = [](RectF a, RectF b) {
+        float left = std::min(a.X, b.X), top = std::min(a.Y, b.Y);
+        return RectF(left, top, std::max(a.GetRight(), b.GetRight()) - left,
+                     std::max(a.GetBottom(), b.GetBottom()) - top);
+    };
+    std::vector<Row> rows;
+    for (const auto* word : words) {
+        const auto& b = word->bounds;
+        Row* match = nullptr;
+        float closest = 1e30f;
+        for (auto& row : rows) {
+            const auto& a = row.bounds;
+            float overlap = std::min(a.GetBottom(), b.GetBottom()) - std::max(a.Y, b.Y);
+            float distance = std::abs(a.Y + a.Height / 2 - b.Y - b.Height / 2);
+            if (overlap >= std::min(a.Height, b.Height) * 0.45f &&
+                distance <= std::max(a.Height, b.Height) * 0.6f && distance < closest) {
+                match = &row;
+                closest = distance;
+            }
+        }
+        if (match) {
+            match->bounds = unite(match->bounds, b);
+            match->words.push_back(word);
+        } else
+            rows.push_back({b, {word}});
+    }
+    std::vector<OcrWord> runs;
+    for (auto& row : rows) {
+        std::stable_sort(
+            row.words.begin(), row.words.end(),
+            [](const OcrWord* a, const OcrWord* b) { return a->bounds.X < b->bounds.X; });
+        OcrWord run;
+        for (const auto* word : row.words) {
+            // Split separate columns or labels, but keep normal interword spaces.
+            if (!run.text.empty() && word->bounds.X - run.bounds.GetRight() >
+                                         1.5f * std::max(run.bounds.Height, word->bounds.Height)) {
+                runs.push_back(std::move(run));
+                run = {};
+            }
+            if (run.text.empty())
+                run = *word;
+            else {
+                run.text += L' ';
+                run.text += word->text;
+                run.bounds = unite(run.bounds, word->bounds);
+            }
+        }
+        if (!run.text.empty())
+            runs.push_back(std::move(run));
+    }
+    std::stable_sort(runs.begin(), runs.end(), [](const OcrWord& a, const OcrWord& b) {
+        return a.bounds.Y < b.bounds.Y || (a.bounds.Y == b.bounds.Y && a.bounds.X < b.bounds.X);
+    });
+    return runs;
+}
 std::wstring loremText(const std::wstring& original, uint32_t& seed) {
     static constexpr const wchar_t* words[] = {L"a",
                                                L"et",
@@ -295,27 +363,27 @@ std::shared_ptr<Gdiplus::Bitmap> prepareLoremImage(std::unique_ptr<Gdiplus::Bitm
         return {};
     auto stopped = [&] { return cancelled && cancelled->load(); };
     Rect context(0, 0, snapshot->GetWidth(), snapshot->GetHeight());
+    const auto runs = textRuns(report);
     std::vector<Replacement> substitutes;
     {
         // RGB snapshots avoid a second full-screen conversion buffer. Estimate
-        // every word from original pixels before any neighboring text is erased.
+        // every line from original pixels before any neighboring text is erased.
         INT format = snapshot->GetPixelFormat() == PixelFormat32bppRGB ? PixelFormat32bppRGB
                                                                        : PixelFormat32bppARGB;
         Raster pixels(*snapshot, ImageLockModeRead, format);
         if (!pixels.locked)
             return {};
-        for (const auto& line : report.lines)
-            for (const auto& word : line.words) {
-                if (stopped())
-                    return {};
-                substitutes.push_back(replacement(pixels, word, context, seed));
-            }
+        for (const auto& run : runs) {
+            if (stopped())
+                return {};
+            substitutes.push_back(replacement(pixels, run, context, seed));
+        }
     }
     if (!substitutes.empty()) {
         Graphics g(snapshot.get());
         if (g.GetLastStatus() != Ok)
             return {};
-        // Erase every detected glyph before drawing any replacement glyphs.
+        // Erase complete runs before drawing any replacement lines.
         for (const auto& word : substitutes) {
             if (stopped())
                 return {};
@@ -339,8 +407,8 @@ std::shared_ptr<Gdiplus::Bitmap> prepareLoremImage(std::unique_ptr<Gdiplus::Bitm
             if (ink.Width <= 0 || ink.Height <= 0)
                 continue;
             REAL sy = word.bounds.Height / ink.Height;
-            // Match the original visual span as well as its character count.
-            // Short substitutions must not leave most of a long word blank.
+            // A whole line shares one baseline, size and horizontal scale.
+            // Never fit individual replacement words to separate OCR boxes.
             REAL sx = word.bounds.Width / ink.Width;
             Matrix transform(sx, 0, 0, sy, word.bounds.X - ink.X * sx, word.bounds.Y - ink.Y * sy);
             glyphs.Transform(&transform);
