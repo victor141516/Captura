@@ -20,9 +20,10 @@ struct Raster {
     Bitmap& bitmap;
     BitmapData data{};
     bool locked;
-    explicit Raster(Bitmap& image, unsigned mode) : bitmap(image) {
+    explicit Raster(Bitmap& image, unsigned mode, INT format = PixelFormat32bppARGB)
+        : bitmap(image) {
         Rect area(0, 0, image.GetWidth(), image.GetHeight());
-        locked = image.LockBits(&area, mode, PixelFormat32bppARGB, &data) == Ok;
+        locked = image.LockBits(&area, mode, format, &data) == Ok;
     }
     ~Raster() {
         if (locked)
@@ -236,99 +237,54 @@ bool applyEffect(Bitmap& patch, bool gaussian, float strength) {
 }
 } // namespace
 
-RedactionResult redact(Gdiplus::Bitmap& source, RECT area, RedactionMode mode, float strength,
-                       const OcrReport* ocr, uint32_t seed, Gdiplus::ARGB fill,
-                       const std::function<void(Gdiplus::Graphics&)>& underlay,
-                       unsigned previewEdge) {
+std::shared_ptr<Gdiplus::Bitmap> prepareLoremImage(std::unique_ptr<Gdiplus::Bitmap> snapshot,
+                                                   const OcrReport& report, uint32_t seed,
+                                                   const std::atomic<bool>* cancelled) {
     using namespace Gdiplus;
-    bool lorem = mode == RedactionMode::LoremGaussian || mode == RedactionMode::LoremPixelate;
-    if (lorem && (!ocr || (ocr->state != OcrState::Ready && ocr->state != OcrState::Empty)))
-        return {}; // Never silently fall back to blurring original text.
-    int width = area.right - area.left, height = area.bottom - area.top;
-    if (width <= 0 || height <= 0)
+    if (!snapshot || snapshot->GetLastStatus() != Ok ||
+        (report.state != OcrState::Ready && report.state != OcrState::Empty))
         return {};
-    bool gaussian = mode == RedactionMode::Gaussian || mode == RedactionMode::LoremGaussian;
-    float scale = previewEdge && std::max(width, height) > int(previewEdge)
-                      ? previewEdge / float(std::max(width, height))
-                      : 1.f;
-    if (!lorem && scale < 1) {
-        // Rasterize ordinary interactive effects directly at preview resolution.
-        // No full-size temporary patch or full-size convolution per cursor event.
-        auto preview =
-            std::make_shared<Bitmap>(std::max(1, int(width * scale)),
-                                     std::max(1, int(height * scale)), PixelFormat32bppARGB);
-        if (preview->GetLastStatus() != Ok)
-            return {};
-        {
-            Graphics g(preview.get());
-            g.Clear(Color(fill));
-            g.TranslateTransform(-area.left * scale, -area.top * scale);
-            g.ScaleTransform(scale, scale);
-            g.SetInterpolationMode(InterpolationModeBilinear);
-            g.SetCompositingMode(CompositingModeSourceCopy);
-            g.DrawImage(&source, 0, 0, source.GetWidth(), source.GetHeight());
-            g.SetCompositingMode(CompositingModeSourceOver);
-            g.SetSmoothingMode(SmoothingModeAntiAlias);
-            if (underlay)
-                underlay(g);
-        }
-        if (!applyEffect(*preview, gaussian, strength * scale))
-            return {};
-        return {std::move(preview), 0};
-    }
-    Rect context(area.left, area.top, width, height);
-    RectF selected(float(area.left), float(area.top), float(width), float(height));
-    std::vector<const OcrWord*> words;
-    if (lorem)
-        for (const auto& line : ocr->lines)
-            for (const auto& word : line.words)
-                if (word.bounds.IntersectsWith(selected)) {
-                    words.push_back(&word);
-                    Rect extra = wordRegion(word.bounds, 6), united;
-                    Rect::Union(united, context, extra);
-                    context = united;
-                }
-    Bitmap backdrop(context.Width, context.Height, PixelFormat32bppARGB);
-    if (backdrop.GetLastStatus() != Ok)
-        return {};
-    {
-        Graphics g(&backdrop);
-        g.Clear(Color(fill));
-        g.TranslateTransform(float(-context.X), float(-context.Y));
-        g.SetCompositingMode(CompositingModeSourceCopy);
-        g.DrawImage(&source, 0, 0, source.GetWidth(), source.GetHeight());
-        g.SetCompositingMode(CompositingModeSourceOver);
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        if (underlay)
-            underlay(g);
-    }
+    auto stopped = [&] { return cancelled && cancelled->load(); };
+    Rect context(0, 0, snapshot->GetWidth(), snapshot->GetHeight());
     std::vector<Replacement> substitutes;
-    if (!words.empty()) {
-        Raster pixels(backdrop, ImageLockModeRead);
+    {
+        // RGB snapshots avoid a second full-screen conversion buffer. Estimate
+        // every word from original pixels before any neighboring text is erased.
+        INT format = snapshot->GetPixelFormat() == PixelFormat32bppRGB ? PixelFormat32bppRGB
+                                                                       : PixelFormat32bppARGB;
+        Raster pixels(*snapshot, ImageLockModeRead, format);
         if (!pixels.locked)
             return {};
-        for (const auto* word : words)
-            substitutes.push_back(replacement(pixels, *word, context, seed));
+        for (const auto& line : report.lines)
+            for (const auto& word : line.words) {
+                if (stopped())
+                    return {};
+                substitutes.push_back(replacement(pixels, word, context, seed));
+            }
     }
-    std::shared_ptr<Bitmap> patch(backdrop.Clone(area.left - context.X, area.top - context.Y, width,
-                                                 height, PixelFormat32bppARGB));
-    if (!patch || patch->GetLastStatus() != Ok)
-        return {};
     if (!substitutes.empty()) {
-        Graphics g(patch.get());
-        g.TranslateTransform(float(-area.left), float(-area.top));
+        Graphics g(snapshot.get());
+        if (g.GetLastStatus() != Ok)
+            return {};
         // Erase every detected glyph before drawing any replacement glyphs.
         for (const auto& word : substitutes) {
+            if (stopped())
+                return {};
             SolidBrush bg(Color(word.background));
             Rect erase = wordRegion(word.bounds, 2);
-            g.FillRectangle(&bg, erase);
+            if (g.FillRectangle(&bg, erase) != Ok)
+                return {};
         }
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         FontFamily family(L"Segoe UI");
         for (const auto& word : substitutes) {
+            if (stopped())
+                return {};
             GraphicsPath glyphs;
-            glyphs.AddString(word.text.c_str(), int(word.text.size()), &family, FontStyleRegular,
-                             32, PointF(0, 0), StringFormat::GenericTypographic());
+            if (glyphs.AddString(word.text.c_str(), int(word.text.size()), &family,
+                                 FontStyleRegular, 32, PointF(0, 0),
+                                 StringFormat::GenericTypographic()) != Ok)
+                return {};
             RectF ink;
             glyphs.GetBounds(&ink);
             if (ink.Width <= 0 || ink.Height <= 0)
@@ -340,25 +296,57 @@ RedactionResult redact(Gdiplus::Bitmap& source, RECT area, RedactionMode mode, f
             Matrix transform(sx, 0, 0, sy, word.bounds.X - ink.X * sx, word.bounds.Y - ink.Y * sy);
             glyphs.Transform(&transform);
             SolidBrush foreground(Color(word.color));
-            g.FillPath(&foreground, &glyphs);
+            if (g.FillPath(&foreground, &glyphs) != Ok)
+                return {};
         }
     }
-    if (scale < 1) {
-        auto smaller =
-            std::make_shared<Bitmap>(std::max(1, int(width * scale)),
-                                     std::max(1, int(height * scale)), PixelFormat32bppARGB);
-        if (smaller->GetLastStatus() != Ok)
-            return {};
-        {
-            Graphics g(smaller.get());
-            g.SetCompositingMode(CompositingModeSourceCopy);
-            g.SetInterpolationMode(InterpolationModeBilinear);
-            g.DrawImage(patch.get(), 0, 0, smaller->GetWidth(), smaller->GetHeight());
-        }
-        patch = std::move(smaller);
+    return stopped() ? std::shared_ptr<Bitmap>{} : std::shared_ptr<Bitmap>(std::move(snapshot));
+}
+
+RedactionResult redact(Gdiplus::Bitmap& source, RECT area, RedactionMode mode, float strength,
+                       const OcrReport* ocr, Gdiplus::ARGB fill,
+                       const std::function<void(Gdiplus::Graphics&)>& underlay,
+                       unsigned previewEdge) {
+    using namespace Gdiplus;
+    bool lorem = mode == RedactionMode::LoremGaussian || mode == RedactionMode::LoremPixelate;
+    Bitmap* base = lorem ? (ocr ? ocr->loremImage.get() : nullptr) : &source;
+    if (!base)
+        return {}; // Never fall back to original text if preparation failed.
+    if (lorem && ((ocr->state != OcrState::Ready && ocr->state != OcrState::Empty) ||
+                  base->GetWidth() != source.GetWidth() || base->GetHeight() != source.GetHeight()))
+        return {};
+    int width = area.right - area.left, height = area.bottom - area.top;
+    if (width <= 0 || height <= 0)
+        return {};
+    RectF selected(float(area.left), float(area.top), float(width), float(height));
+    unsigned words = 0;
+    if (lorem)
+        for (const auto& line : ocr->lines)
+            for (const auto& word : line.words)
+                words += word.bounds.IntersectsWith(selected);
+    float scale = previewEdge && std::max(width, height) > int(previewEdge)
+                      ? previewEdge / float(std::max(width, height))
+                      : 1.f;
+    auto patch = std::make_shared<Bitmap>(std::max(1, int(width * scale)),
+                                          std::max(1, int(height * scale)), PixelFormat32bppARGB);
+    if (patch->GetLastStatus() != Ok)
+        return {};
+    {
+        Graphics g(patch.get());
+        g.Clear(Color(fill));
+        g.TranslateTransform(-area.left * scale, -area.top * scale);
+        g.ScaleTransform(scale, scale);
+        g.SetInterpolationMode(InterpolationModeBilinear);
+        g.SetCompositingMode(CompositingModeSourceCopy);
+        g.DrawImage(base, 0, 0, base->GetWidth(), base->GetHeight());
+        g.SetCompositingMode(CompositingModeSourceOver);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        if (underlay)
+            underlay(g);
     }
+    bool gaussian = mode == RedactionMode::Gaussian || mode == RedactionMode::LoremGaussian;
     if (!applyEffect(*patch, gaussian, strength * scale))
         return {};
-    return {std::move(patch), unsigned(substitutes.size())};
+    return {std::move(patch), words};
 }
 } // namespace captura

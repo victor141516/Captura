@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.18.2 — Redaction preview
+
+- Prepare one full-desktop Lorem image immediately after OCR, in the background worker, reusing its private screenshot snapshot.
+- Reuse that immutable image for every Lorem blur and pixelation rectangle. Moving, resizing, adding, and overlapping areas no longer regenerate replacement text or resample text colors.
+- Keep the original capture unchanged outside each effect rectangle and retain full-resolution exports.
+- Use bounded direct previews for Lorem modes too, and show the one-time Lorem preparation duration in OCR metrics.
+- Reject cancelled, unavailable, and obsolete prepared images; prevent earlier ordinary redactions from overwriting the Lorem base with original text.
+
 ## 1.18.1 — Redaction preview
 
 - Match Lorem substitution to the original word's character count, capitalization, and visible width. Prefer equally long Lorem words and use phrases for longer originals.

@@ -17,8 +17,8 @@ END
 
 1 RT_MANIFEST "app.manifest"
 1 VERSIONINFO
-FILEVERSION 1,18,1,0
-PRODUCTVERSION 1,18,1,0
+FILEVERSION 1,18,2,0
+PRODUCTVERSION 1,18,2,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -30,7 +30,7 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "Captura - screenshots and annotations\0"
    VALUE "ProductName", "Captura\0"
-   VALUE "FileVersion", "1.18.1-redaction-preview\0"
+   VALUE "FileVersion", "1.18.2-redaction-preview\0"
    VALUE "OriginalFilename", "Captura.exe\0"
   END
  END

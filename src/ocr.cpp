@@ -15,6 +15,7 @@
 #include <winrt/Windows.Media.Ocr.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include "ocr.h"
+#include "redaction.h"
 
 namespace captura {
 namespace {
@@ -173,8 +174,21 @@ void recognize(OcrJob& job) {
         report.error = L"Could not recognize this screenshot.";
         report.state = OcrState::Failed;
     }
-    if (job.cancelled)
+    if (!job.cancelled && (report.state == OcrState::Ready || report.state == OcrState::Empty)) {
+        double started = clockMs();
+        try {
+            report.loremImage = prepareLoremImage(std::move(job.source), report,
+                                                  uint32_t(job.id * 2654435761ull), &job.cancelled);
+        } catch (...) {
+            report.loremImage.reset();
+        }
+        report.loremMs = clockMs() - started;
+        peak = std::max(peak, workingSet());
+    }
+    if (job.cancelled) {
         report.state = OcrState::Cancelled;
+        report.loremImage.reset();
+    }
     report.elapsedMs = clockMs() - job.started;
     report.cpuMs = std::max(0.0, processCpuMs() - job.startedCpu);
     unsigned processors = std::max(1UL, GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
@@ -283,12 +297,13 @@ std::wstring selectedText(const OcrReport& report, const Gdiplus::RectF& area) {
 std::wstring metricsText(const OcrReport& report) {
     wchar_t text[512];
     swprintf_s(text,
-               L"Elapsed: %.1f ms\nRecognition: %.1f ms\nCPU (process): %.1f ms\nAverage CPU: "
+               L"Elapsed: %.1f ms\nRecognition: %.1f ms\nLorem preparation: %.1f ms\nCPU "
+               L"(process): %.1f ms\nAverage CPU: "
                L"%.1f%%\nSampled peak RAM: %.1f MiB\nRAM growth: %.1f MiB\n%u × %u px · %u "
                L"tiles\n%u words · %ls",
-               report.elapsedMs, report.recognitionMs, report.cpuMs, report.cpuPercent,
-               report.peakMemoryMiB, report.memoryGrowthMiB, report.width, report.height,
-               report.tiles, report.words, report.language.c_str());
+               report.elapsedMs, report.recognitionMs, report.loremMs, report.cpuMs,
+               report.cpuPercent, report.peakMemoryMiB, report.memoryGrowthMiB, report.width,
+               report.height, report.tiles, report.words, report.language.c_str());
     return text;
 }
 } // namespace captura

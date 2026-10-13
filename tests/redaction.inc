@@ -46,6 +46,54 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
         addWord(g, L"A", {60, 250}, 56, 0xff202833);
     }
     const auto original = redactionPixels(*app.image);
+    auto prepare = [&](uint32_t seed) {
+        std::unique_ptr<Bitmap> copy(app.image->Clone(0, 0, app.image->GetWidth(),
+                                                      app.image->GetHeight(), PixelFormat32bppRGB));
+        return prepareLoremImage(std::move(copy), recognition->report, seed);
+    };
+    recognition->report.loremImage = prepare(917);
+    check(recognition->report.loremImage != nullptr && redactionPixels(*app.image) == original,
+          L"Preparing a whole Lorem screenshot preserves immutable original pixels");
+    auto prepared = recognition->report.loremImage;
+    auto preparedPixels = redactionPixels(*prepared);
+    auto cropped = redact(*app.image, {35, 135, 355, 195}, RedactionMode::LoremPixelate, 1,
+                          &recognition->report, 0xffffffff);
+    auto expanded = redact(*app.image, {35, 35, 360, 195}, RedactionMode::LoremPixelate, 1,
+                           &recognition->report, 0xffffffff);
+    auto movedPatch = redact(*app.image, {45, 145, 365, 205}, RedactionMode::LoremPixelate, 1,
+                             &recognition->report, 0xffffffff);
+    auto sameOverlap = [&](const RedactionResult& a, RECT ra, const RedactionResult& b, RECT rb) {
+        if (!a.bitmap || !b.bitmap)
+            return false;
+        RECT overlap;
+        if (!IntersectRect(&overlap, &ra, &rb))
+            return false;
+        auto first = redactionPixels(*a.bitmap), second = redactionPixels(*b.bitmap);
+        for (int y = overlap.top; y < overlap.bottom; ++y)
+            for (int x = overlap.left; x < overlap.right; ++x)
+                if (first[size_t(y - ra.top) * (ra.right - ra.left) + x - ra.left] !=
+                    second[size_t(y - rb.top) * (rb.right - rb.left) + x - rb.left])
+                    return false;
+        return true;
+    };
+    check(sameOverlap(cropped, {35, 135, 355, 195}, expanded, {35, 35, 360, 195}),
+          L"Resizing Lorem area to include earlier OCR words preserves existing text pixels");
+    check(sameOverlap(cropped, {35, 135, 355, 195}, movedPatch, {45, 145, 365, 205}),
+          L"Moving Lorem area samples identical text in overlapping screenshot coordinates");
+    check(recognition->report.loremImage == prepared &&
+              redactionPixels(*prepared) == preparedPixels,
+          L"Repeated redaction reads one immutable prepared Lorem screenshot");
+    std::atomic<bool> cancelled{true};
+    check(!prepareLoremImage(
+              std::unique_ptr<Bitmap>(app.image->Clone(0, 0, 800, 400, PixelFormat32bppRGB)),
+              recognition->report, 917, &cancelled),
+          L"Cancelled Lorem preparation never publishes a partially modified screenshot");
+    OcrReport empty;
+    empty.state = OcrState::Empty;
+    auto emptyImage = prepareLoremImage(
+        std::unique_ptr<Bitmap>(app.image->Clone(0, 0, 800, 400, PixelFormat32bppRGB)), empty, 917);
+    check(emptyImage && redactionPixels(*emptyImage) == original,
+          L"No-text OCR prepares an identical fallback screenshot once");
     app.items.clear();
     app.undo.clear();
     app.redo.clear();
@@ -77,7 +125,6 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
         effect.b = {float(area.right), float(area.bottom)};
         effect.style.redaction = mode;
         effect.style.size = 12;
-        effect.loremSeed = 917;
         app.items = {effect};
         app.selected = 0;
         auto output = flattened();
@@ -112,11 +159,11 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
               L"pixels exactly");
     }
     auto tiny = redact(*app.image, {50, 50, 51, 51}, RedactionMode::LoremGaussian, 64,
-                       &recognition->report, 17, 0xffffffff);
+                       &recognition->report, 0xffffffff);
     check(tiny.bitmap && tiny.replacedWords == 1 && tiny.bitmap->GetWidth() == 1,
           L"One-pixel intersection replaces word even when its center lies outside selection");
     auto white = redact(*app.image, {405, 235, 750, 305}, RedactionMode::LoremPixelate, 1,
-                        &recognition->report, 19, 0xffffffff);
+                        &recognition->report, 0xffffffff);
     if (white.bitmap) {
         auto pixels = redactionPixels(*white.bitmap);
         check(std::count(pixels.begin(), pixels.end(), ARGB(0xff087cf0)) > 1000 &&
@@ -125,7 +172,7 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     } else
         check(false, L"Lorem replacement preserves blue background and white foreground estimates");
     auto blue = redact(*app.image, {35, 135, 355, 195}, RedactionMode::LoremPixelate, 1,
-                       &recognition->report, 19, 0xffffffff);
+                       &recognition->report, 0xffffffff);
     if (blue.bitmap) {
         auto pixels = redactionPixels(*blue.bitmap);
         check(std::count(pixels.begin(), pixels.end(), ARGB(0xff087cf0)) > 100 &&
@@ -135,8 +182,9 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
         check(false, L"Lorem replacement preserves colored foreground on a light background");
     Bitmap grid(12, 8, PixelFormat32bppARGB);
     for (uint32_t seed : {17u, 19u, 71u, 917u}) {
+        recognition->report.loremImage = prepare(seed);
         auto matching = redact(*app.image, {35, 135, 355, 195}, RedactionMode::LoremPixelate, 1,
-                               &recognition->report, seed, 0xffffffff);
+                               &recognition->report, 0xffffffff);
         int left = 320, right = -1;
         if (matching.bitmap) {
             auto pixels = redactionPixels(*matching.bitmap);
@@ -152,7 +200,7 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
               L"Lorem replacement covers the original word width across different random seeds");
     }
     auto lowContrast = redact(*app.image, {410, 345, 740, 395}, RedactionMode::LoremPixelate, 1,
-                              &recognition->report, 37, 0xffffffff);
+                              &recognition->report, 0xffffffff);
     bool preservedGray = false;
     if (lowContrast.bitmap)
         for (ARGB color : redactionPixels(*lowContrast.bitmap)) {
@@ -165,9 +213,9 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     for (int y = 0; y < 8; ++y)
         for (int x = 0; x < 12; ++x)
             grid.SetPixel(x, y, Color(255, BYTE(x * 20), BYTE(y * 30), BYTE((x + y) * 10)));
-    auto blocks = redact(grid, {0, 0, 12, 8}, RedactionMode::Pixelate, 4, nullptr, 0, 0xffffffff);
-    auto fine = redact(grid, {0, 0, 12, 8}, RedactionMode::Pixelate, 1, nullptr, 0, 0xffffffff);
-    auto coarse = redact(grid, {0, 0, 12, 8}, RedactionMode::Pixelate, 8, nullptr, 0, 0xffffffff);
+    auto blocks = redact(grid, {0, 0, 12, 8}, RedactionMode::Pixelate, 4, nullptr, 0xffffffff);
+    auto fine = redact(grid, {0, 0, 12, 8}, RedactionMode::Pixelate, 1, nullptr, 0xffffffff);
+    auto coarse = redact(grid, {0, 0, 12, 8}, RedactionMode::Pixelate, 8, nullptr, 0xffffffff);
     check(fine.bitmap && redactionPixels(*fine.bitmap) == redactionPixels(grid),
           L"Pixelate at minimum strength preserves exact source pixels");
     bool uniform = blocks.bitmap != nullptr;
@@ -182,9 +230,9 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     check(uniform && coarse.bitmap &&
               redactionPixels(*coarse.bitmap) != redactionPixels(*blocks.bitmap),
           L"Pixelation uses uniform averaged blocks and grows them with strength");
-    check(!redact(grid, {0, 0, 12, 8}, RedactionMode::LoremGaussian, 12, nullptr, 0, 0xffffffff)
-               .bitmap,
-          L"Lorem processing never falls back to the original when OCR is unavailable");
+    check(
+        !redact(grid, {0, 0, 12, 8}, RedactionMode::LoremGaussian, 12, nullptr, 0xffffffff).bitmap,
+        L"Lorem processing never falls back to the original when OCR is unavailable");
     app.items.clear();
     app.undo.clear();
     app.redo.clear();
@@ -207,6 +255,8 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     perform(240);
     app.selected = 0;
     auto processed = flattened();
+    check(app.items[0].redactionCache->source == app.image.get(),
+          L"Ordinary pixelation uses the original source screenshot");
     auto firstCache = app.items[0].redactionCache;
     processed = flattened();
     check(firstCache == app.items[0].redactionCache,
@@ -214,6 +264,8 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     perform(263);
     processed = flattened();
     auto loremCache = app.items[0].redactionCache;
+    check(loremCache->source == recognition->report.loremImage.get(),
+          L"Lorem rectangle uses the OCR job's shared prepared screenshot");
     check(app.items[0].style.redaction == 3 && loremCache != firstCache &&
               loremCache->result.replacedWords == 2,
           L"Mode selector updates selected rectangle and rebuilds its effect");
@@ -225,6 +277,8 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     check(app.items[0].style.size == 12, L"Undo restores previous redaction strength");
     setTool(Tool::Select);
     app.selected = 0;
+    auto stableLorem = recognition->report.loremImage;
+    auto stablePixels = redactionPixels(*stableLorem);
     mouseDown(toScreen({200, 100}));
     releasePointer(toScreen({230, 125}));
     RECT moved = redactionRegion(app.items[0]);
@@ -240,6 +294,9 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     releasePointer(toScreen({390, 210}));
     check(redactionRegion(app.items[0]).right == 390 && redactionRegion(app.items[0]).bottom == 210,
           L"Redaction corner handles resize the actual processing region");
+    check(recognition->report.loremImage == stableLorem &&
+              redactionPixels(*stableLorem) == stablePixels,
+          L"Real pointer move, corner resize and undo do not regenerate Lorem content");
     undo(false);
     setTool(Tool::TextSelect);
     testCopiedText = L"clipboard retained";
@@ -257,6 +314,23 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     releasePointer(toScreen({360, 195}));
     check(testCopiedText == L"PRIVATE123\r\nBLUESECRET",
           L"Removing redaction restores original OCR selection");
+    Item cover;
+    cover.tool = Tool::Redact;
+    cover.a = {35, 35};
+    cover.b = {360, 195};
+    cover.style.redaction = 3;
+    cover.style.size = 1;
+    app.items = {cover};
+    auto solo = redactionPixels(*flattened());
+    Item prior = cover;
+    prior.style.redaction = 0;
+    app.items = {prior, cover};
+    check(redactionPixels(*flattened()) == solo,
+          L"Earlier ordinary blur cannot reintroduce original text into a later Lorem rectangle");
+    prior.style.redaction = 1;
+    app.items = {prior, cover};
+    check(redactionPixels(*flattened()) == solo,
+          L"Earlier ordinary pixelation cannot overwrite the prepared Lorem base");
     // Earlier annotations participate in effects; cache tracks their content, not hover state.
     Item annotation;
     annotation.tool = Tool::Text;
@@ -287,7 +361,7 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     recognition->complete = true;
     // Real system OCR sees the substituted pixels, not the synthetic private string.
     auto substituted = redact(*app.image, {35, 35, 360, 110}, RedactionMode::LoremGaussian, 1,
-                              &recognition->report, 71, 0xffffffff);
+                              &recognition->report, 0xffffffff);
     if (substituted.bitmap) {
         auto job = ocrService.start(*substituted.bitmap, nullptr, 0);
         auto started = GetTickCount64();
@@ -312,8 +386,8 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
         for (int mode = 0; mode < 4; ++mode) {
             drawText(g, ui::kRedactionModes[mode], {float(mode * 420), 8, 420, 34}, 16, Ink, true,
                      true);
-            auto result = redact(*app.image, area, RedactionMode(mode), 6, &recognition->report, 71,
-                                 0xffffffff);
+            auto result =
+                redact(*app.image, area, RedactionMode(mode), 6, &recognition->report, 0xffffffff);
             if (result.bitmap)
                 g.DrawImage(result.bitmap.get(), 420 * mode + 45, 90);
         }
@@ -344,6 +418,11 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
         drawText(g, L"Preview test", {30, 50, 1000, 120}, 80);
     }
     app.canvas = {{0, 0, 1600, 900}, {0, 0, 1600, 900}, 0xffffffff};
+    check(!redact(*app.image, {20, 20, 1500, 850}, RedactionMode::LoremPixelate, 1,
+                  &recognition->report, 0xffffffff)
+               .bitmap,
+          L"A prepared image with obsolete capture dimensions is rejected");
+    recognition->report.loremImage = prepare(917);
     app.items = {effect};
     app.items[0].a = {20, 20};
     app.items[0].b = {1500, 850};
@@ -385,7 +464,7 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
                 LARGE_INTEGER start, end;
                 QueryPerformanceCounter(&start);
                 auto result = redact(*app.image, {20, 20, 1500, 850}, RedactionMode(mode), 32,
-                                     &recognition->report, 0, 0xffffffff, {}, edge);
+                                     &recognition->report, 0xffffffff, {}, edge);
                 QueryPerformanceCounter(&end);
                 double ms = (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
                 fprintf(measurements, "%s %s: %.2f ms (%u x %u pixels)\r\n",

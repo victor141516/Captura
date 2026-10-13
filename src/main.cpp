@@ -68,7 +68,6 @@ struct Item {
     bool cropped = false;
     std::vector<PointF> stroke;
     RectF strokeBounds;
-    uint32_t loremSeed = 1;
     mutable std::shared_ptr<RedactionCache> redactionCache;
 };
 struct ImageCanvas {
@@ -127,7 +126,6 @@ struct AppState {
     PointF textStart{};
     RectF textArea{};
     std::wstring textFeedback;
-    uint32_t redactionSequence = 0;
 #ifdef CAPTURA_TEST
     bool shortcutPreview = false;
     bool testAutoOcr = false;
@@ -158,6 +156,11 @@ const captura::OcrReport* ocrReport() {
 bool ocrReady() {
     const auto* report = ocrReport();
     return report && report->state == captura::OcrState::Ready;
+}
+bool loremReady() {
+    const auto* report = ocrReport();
+    return report && report->loremImage &&
+           (report->state == captura::OcrState::Ready || report->state == captura::OcrState::Empty);
 }
 void startOcr() {
     if (app.ocr)
@@ -688,7 +691,6 @@ uint64_t underlayHash(int before) {
         bytes(&item.bent, sizeof(item.bent));
         bytes(&item.number, sizeof(item.number));
         bytes(&item.pointer, sizeof(item.pointer));
-        bytes(&item.loremSeed, sizeof(item.loremSeed));
         bytes(item.text.data(), item.text.size() * sizeof(wchar_t));
         bytes(item.stroke.data(), item.stroke.size() * sizeof(PointF));
     }
@@ -717,15 +719,17 @@ void drawRedaction(Graphics& g, const Item& item, bool interactive) {
         index = 0;
     uint64_t hash = underlayHash(index);
     const auto* ocr = item.style.redaction >= 2 ? ocrReport() : nullptr;
+    const Bitmap* source =
+        item.style.redaction >= 2 ? (ocr ? ocr->loremImage.get() : nullptr) : app.image.get();
     auto cache = item.redactionCache;
     bool preview = interactive && (app.dragging || app.sizing) &&
                    (selected || (cache && (cache->underlay != hash || cache->preview)));
-    if (!cache || cache->source != app.image.get() || !EqualRect(&cache->region, &r) ||
+    if (!cache || cache->source != source || !EqualRect(&cache->region, &r) ||
         cache->mode != item.style.redaction || cache->strength != item.style.size ||
         cache->ocr != ocr || cache->preview != preview || cache->underlay != hash ||
         cache->fill != app.canvas.color) {
         cache = std::make_shared<RedactionCache>();
-        cache->source = app.image.get();
+        cache->source = source;
         cache->region = r;
         cache->mode = item.style.redaction;
         cache->strength = item.style.size;
@@ -736,10 +740,11 @@ void drawRedaction(Graphics& g, const Item& item, bool interactive) {
         try {
             cache->result = captura::redact(
                 *app.image, r, static_cast<captura::RedactionMode>(cache->mode), cache->strength,
-                ocr, item.loremSeed, app.canvas.color,
-                [index](Graphics& below) {
+                ocr, app.canvas.color,
+                [index, lorem = cache->mode >= 2](Graphics& below) {
                     for (int k = 0; k < index; ++k)
-                        drawItem(below, app.items[k]);
+                        if (!lorem || app.items[k].tool != Tool::Redact)
+                            drawItem(below, app.items[k]);
                 },
                 preview ? 384 : 0);
         } catch (...) {
@@ -1883,8 +1888,7 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
     } else {
         if (t == Tool::Redact) {
             const auto* recognition = ocrReport();
-            bool available = recognition && (recognition->state == captura::OcrState::Ready ||
-                                             recognition->state == captura::OcrState::Empty);
+            bool available = loremReady();
             for (int mode = 0; mode < 4; ++mode) {
                 button(g, {px, y, pw, 30 * s}, 260 + mode, ui::kRedactionModes[mode],
                        st.redaction == mode, false, mode < 2 || available);
@@ -1892,7 +1896,7 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
             }
             const wchar_t* note =
                 available     ? L"Lorem replaces detected text before applying the effect."
-                : recognition ? L"Text replacement requires Windows OCR."
+                : recognition ? L"Lorem image is unavailable."
                               : L"Recognizing text… Lorem modes will be available when ready.";
             Font font(L"Segoe UI", 11 * s, FontStyleRegular, UnitPixel);
             SolidBrush ink(Muted);
@@ -2472,9 +2476,7 @@ void perform(int id, PointF point) {
     else if (id >= 100 && id < 100 + ToolCount)
         setTool(static_cast<Tool>(id - 100));
     else if (id >= 260 && id < 264) {
-        const auto* result = ocrReport();
-        if (id >= 262 && (!result || (result->state != captura::OcrState::Ready &&
-                                      result->state != captura::OcrState::Empty)))
+        if (id >= 262 && !loremReady())
             return;
         if (validIndex(app.selected))
             checkpoint();
@@ -2740,10 +2742,7 @@ void mouseDown(PointF screen) {
     }
     if (app.tool == Tool::Redact) {
         p = {std::round(p.X), std::round(p.Y)};
-        const auto* recognized = ocrReport();
-        if (app.defaults[static_cast<int>(Tool::Redact)].redaction >= 2 &&
-            (!recognized || (recognized->state != captura::OcrState::Ready &&
-                             recognized->state != captura::OcrState::Empty))) {
+        if (app.defaults[static_cast<int>(Tool::Redact)].redaction >= 2 && !loremReady()) {
             report(L"Wait for Windows OCR before replacing text.");
             return;
         }
@@ -2789,8 +2788,6 @@ void mouseDown(PointF screen) {
     item.tool = app.tool;
     item.a = item.b = p;
     item.style = app.defaults[static_cast<int>(app.tool)];
-    if (item.tool == Tool::Redact)
-        item.loremSeed = GetTickCount() ^ (++app.redactionSequence * 2654435761u);
     if (item.tool == Tool::Brush) {
         item.stroke.push_back(p);
         item.strokeBounds = {p.X, p.Y, 0, 0};

@@ -22,9 +22,10 @@ struct OcrReport {
     OcrState state = OcrState::Failed;
     std::wstring language, error;
     std::vector<OcrLine> lines;
-    double elapsedMs = 0, recognitionMs = 0, cpuMs = 0, cpuPercent = 0;
+    double elapsedMs = 0, recognitionMs = 0, loremMs = 0, cpuMs = 0, cpuPercent = 0;
     double peakMemoryMiB = 0, memoryGrowthMiB = 0;
     unsigned width = 0, height = 0, tiles = 0, words = 0;
+    std::shared_ptr<Gdiplus::Bitmap> loremImage;
 };
 struct OcrJob {
     uint64_t id = 0;

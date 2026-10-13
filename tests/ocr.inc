@@ -156,6 +156,10 @@ template <typename Check> void testOcr(const std::wstring& directory, Check chec
         }
         check(found.state == OcrState::Ready,
               L"System OCR recognizes synthetic screenshot without package identity");
+        check(found.loremImage && found.loremImage->GetWidth() == found.width &&
+                  found.loremImage->GetHeight() == found.height && !current->source &&
+                  found.loremMs > 0,
+              L"OCR completion publishes one full-desktop Lorem image using its private snapshot");
         std::wstring text = selectedText(found, {0, 0, float(found.width), float(found.height)});
         check(text.find(L"Captura") != std::wstring::npos &&
                   text.find(L"12345") != std::wstring::npos,
