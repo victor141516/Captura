@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.18.0 — Redaction preview (local experiment)
+
+- Add **Redact (B)** with Gaussian blur, pixelation, Lorem + Gaussian, and Lorem + Pixelate.
+- Draw, move, resize, delete, undo, and redo effect rectangles. Moving the slider right increases blur radius or pixel block size.
+- Estimate the background and text color around each intersecting OCR word, erase the original within the selection, and draw Lorem Ipsum with matching glyph height before applying the effect.
+- Keep every pixel outside the selected rectangle unchanged, even when a rectangle cuts through a letter. Retain the full editable original until export.
+- Exclude original words intersecting redactions from OCR highlights and text copying.
+- Reuse processed regions during navigation, use bounded interactive previews, and always process exports at full resolution.
+- Include earlier annotations in the effect and release all cached bitmaps before graphics shutdown.
+
 ## 1.17.0 — OCR preview (local experiment)
 
 - Recognize the complete frozen desktop automatically in the background when a capture opens, including context outside the initial frame.

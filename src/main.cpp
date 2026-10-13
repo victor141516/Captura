@@ -23,6 +23,7 @@
 #include "resource.h"
 #include "capture_shortcut.h"
 #include "ocr.h"
+#include "redaction.h"
 
 using namespace Gdiplus;
 constexpr wchar_t AppClass[] = L"Captura.Native.Editor.1";
@@ -35,13 +36,25 @@ const Color Ink(255, 35, 43, 55), Muted(255, 103, 114, 130), Blue(255, 0, 110, 2
 const std::array<ARGB, 11> Swatches = {0xffef3e42, 0xfff28c28, 0xffffd23f, 0xff16a765,
                                        0xff087cf0, 0xff8752d6, 0xffec70a5, 0xff202833,
                                        0xffffffff, 0xff758294, 0xff00bcd4};
-enum class Tool { Select, Arrow, Text, Rectangle, Line, Counter, Brush, TextSelect };
-constexpr int ToolCount = 8;
+enum class Tool { Select, Arrow, Text, Rectangle, Line, Counter, Brush, TextSelect, Redact };
+constexpr int ToolCount = 9;
 struct Style {
     ARGB color = 0xffef3e42, fill = 0xffef3e42;
     bool filled = false;
     REAL size = 12;
     int arrow = 0;
+    int redaction = 1;
+};
+struct RedactionCache {
+    const Bitmap* source = nullptr;
+    const captura::OcrReport* ocr = nullptr;
+    RECT region{};
+    REAL strength = 0;
+    int mode = -1;
+    ARGB fill = 0;
+    uint64_t underlay = 0;
+    bool preview = false;
+    captura::RedactionResult result;
 };
 struct Item {
     Tool tool = Tool::Arrow;
@@ -55,6 +68,8 @@ struct Item {
     bool cropped = false;
     std::vector<PointF> stroke;
     RectF strokeBounds;
+    uint32_t loremSeed = 1;
+    mutable std::shared_ptr<RedactionCache> redactionCache;
 };
 struct ImageCanvas {
     RECT bounds{}, manualFrame{};
@@ -112,6 +127,7 @@ struct AppState {
     PointF textStart{};
     RectF textArea{};
     std::wstring textFeedback;
+    uint32_t redactionSequence = 0;
 #ifdef CAPTURA_TEST
     bool shortcutPreview = false;
     bool testAutoOcr = false;
@@ -638,7 +654,117 @@ void inlineSelection(Graphics& g, const Item& item, RectF ink) {
         row++;
     } while (begin <= item.text.size());
 }
-void drawItem(Graphics& g, const Item& i) {
+RECT redactionRegion(const Item& item) {
+    RectF r = normalized(item.a, item.b);
+    return {LONG(std::floor(r.X)), LONG(std::floor(r.Y)), LONG(std::ceil(r.GetRight())),
+            LONG(std::ceil(r.GetBottom()))};
+}
+bool hiddenOcrWord(const captura::OcrWord& word) {
+    for (const auto& item : app.items)
+        if (item.tool == Tool::Redact && word.bounds.IntersectsWith(normalized(item.a, item.b)))
+            return true;
+    return false;
+}
+void drawItem(Graphics& g, const Item& item, bool interactive = false);
+uint64_t underlayHash(int before) {
+    uint64_t hash = 14695981039346656037ull;
+    auto bytes = [&](const void* value, size_t size) {
+        auto* data = static_cast<const BYTE*>(value);
+        for (size_t n = 0; n < size; ++n)
+            hash = (hash ^ data[n]) * 1099511628211ull;
+    };
+    for (int index = 0; index < before; ++index) {
+        const auto& item = app.items[index];
+        bytes(&item.tool, sizeof(item.tool));
+        bytes(&item.a, sizeof(item.a));
+        bytes(&item.b, sizeof(item.b));
+        bytes(&item.style.color, sizeof(item.style.color));
+        bytes(&item.style.fill, sizeof(item.style.fill));
+        bytes(&item.style.filled, sizeof(item.style.filled));
+        bytes(&item.style.size, sizeof(item.style.size));
+        bytes(&item.style.arrow, sizeof(item.style.arrow));
+        bytes(&item.style.redaction, sizeof(item.style.redaction));
+        bytes(&item.bend, sizeof(item.bend));
+        bytes(&item.bent, sizeof(item.bent));
+        bytes(&item.number, sizeof(item.number));
+        bytes(&item.pointer, sizeof(item.pointer));
+        bytes(&item.loremSeed, sizeof(item.loremSeed));
+        bytes(item.text.data(), item.text.size() * sizeof(wchar_t));
+        bytes(item.stroke.data(), item.stroke.size() * sizeof(PointF));
+    }
+    return hash;
+}
+void drawRedaction(Graphics& g, const Item& item, bool interactive) {
+    if (!app.image)
+        return;
+    RECT r = redactionRegion(item);
+    if (IsRectEmpty(&r))
+        return;
+    RectF bounds(float(r.left), float(r.top), float(r.right - r.left), float(r.bottom - r.top));
+    bool selected = validIndex(app.selected) && &item == &app.items[app.selected];
+    if (interactive && selected && app.creating) {
+        SolidBrush tint(Color(45, 0, 110, 235));
+        Pen outline(Blue, 1.5f / app.layout.zoom);
+        g.FillRectangle(&tint, bounds);
+        g.DrawRectangle(&outline, bounds);
+        return;
+    }
+    int index = 0;
+    for (; index < int(app.items.size()); ++index)
+        if (&app.items[index] == &item)
+            break;
+    if (index == int(app.items.size()))
+        index = 0;
+    uint64_t hash = underlayHash(index);
+    const auto* ocr = item.style.redaction >= 2 ? ocrReport() : nullptr;
+    auto cache = item.redactionCache;
+    bool preview = interactive && (app.dragging || app.sizing) &&
+                   (selected || (cache && (cache->underlay != hash || cache->preview)));
+    if (!cache || cache->source != app.image.get() || !EqualRect(&cache->region, &r) ||
+        cache->mode != item.style.redaction || cache->strength != item.style.size ||
+        cache->ocr != ocr || cache->preview != preview || cache->underlay != hash ||
+        cache->fill != app.canvas.color) {
+        cache = std::make_shared<RedactionCache>();
+        cache->source = app.image.get();
+        cache->region = r;
+        cache->mode = item.style.redaction;
+        cache->strength = item.style.size;
+        cache->ocr = ocr;
+        cache->preview = preview;
+        cache->underlay = hash;
+        cache->fill = app.canvas.color;
+        try {
+            cache->result = captura::redact(
+                *app.image, r, static_cast<captura::RedactionMode>(cache->mode), cache->strength,
+                ocr, item.loremSeed, app.canvas.color,
+                [index](Graphics& below) {
+                    for (int k = 0; k < index; ++k)
+                        drawItem(below, app.items[k]);
+                },
+                preview ? 384 : 0);
+        } catch (...) {
+            cache->result = {};
+        }
+        item.redactionCache = cache;
+    }
+    GraphicsState state = g.Save();
+    g.SetClip(bounds, CombineModeIntersect);
+    if (cache->result.bitmap) {
+        g.SetCompositingMode(CompositingModeSourceCopy);
+        g.SetInterpolationMode(InterpolationModeNearestNeighbor);
+        g.SetPixelOffsetMode(PixelOffsetModeHalf);
+        auto& patch = *cache->result.bitmap;
+        g.DrawImage(&patch, bounds, 0, 0, float(patch.GetWidth()), float(patch.GetHeight()),
+                    UnitPixel);
+    } else {
+        // An unavailable text replacement or failed effect must never expose
+        // original information through an apparently applied privacy rectangle.
+        SolidBrush opaque(Color(255, 117, 130, 148));
+        g.FillRectangle(&opaque, bounds);
+    }
+    g.Restore(state);
+}
+void drawItem(Graphics& g, const Item& i, bool interactive) {
     const Style& s = i.style;
     Pen pen(Color(s.color), s.size);
     pen.SetLineJoin(LineJoinRound);
@@ -646,6 +772,9 @@ void drawItem(Graphics& g, const Item& i) {
     pen.SetEndCap(LineCapRound);
     SolidBrush foreground(Color(s.color)), fill(Color(s.fill));
     switch (i.tool) {
+    case Tool::Redact:
+        drawRedaction(g, i, interactive);
+        break;
     case Tool::Arrow:
         drawArrowItem(g, i);
         break;
@@ -726,7 +855,7 @@ std::vector<PointF> handles(const Item& i) {
         return {
             {r.X, r.Y}, {r.GetRight(), r.Y}, {r.GetRight(), r.GetBottom()}, {r.X, r.GetBottom()}};
     }
-    if (i.tool == Tool::Rectangle) {
+    if (i.tool == Tool::Rectangle || i.tool == Tool::Redact) {
         RectF r = normalized(i.a, i.b);
         return {
             {r.X, r.Y}, {r.GetRight(), r.Y}, {r.GetRight(), r.GetBottom()}, {r.X, r.GetBottom()}};
@@ -745,6 +874,8 @@ REAL segmentDistance(PointF p, PointF a, PointF b) {
     return distance(p, {a.X + t * d.X, a.Y + t * d.Y});
 }
 bool hitItem(const Item& i, PointF p, REAL tolerance) {
+    if (i.tool == Tool::Redact)
+        return contains(normalized(i.a, i.b), p);
     if (i.tool == Tool::Brush) {
         REAL radius = std::max(tolerance, i.style.size / 2);
         if (i.stroke.size() < 2)
@@ -850,6 +981,8 @@ ARGB dominantEdgeColor(unsigned sides) {
 RectF itemVisualBounds(const Item& item) {
     RectF bounds = normalized(item.a, item.b);
     REAL padding = item.style.size / 2 + 1;
+    if (item.tool == Tool::Redact)
+        padding = 0;
     auto include = [&](PointF p) {
         REAL left = std::min(bounds.X, p.X), top = std::min(bounds.Y, p.Y);
         bounds = {left, top, std::max(bounds.GetRight(), p.X) - left,
@@ -1169,6 +1302,13 @@ void toolIcon(Graphics& g, Tool tool, RectF r, Color color) {
         g.DrawLine(&pen, 8.f, 7.f, 16.f, 7.f);
         g.DrawLine(&pen, 12.f, 7.f, 12.f, 17.f);
         g.DrawLine(&pen, 9.f, 17.f, 15.f, 17.f);
+    } else if (tool == Tool::Redact) {
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column) {
+                REAL width = 3.f + (row + column) % 2;
+                SolidBrush tile(color);
+                g.FillRectangle(&tile, 3.f + column * 7, 3.f + row * 7, width, width);
+            }
     } else if (tool == Tool::Brush) {
         GraphicsPath handle;
         handle.AddLine(11.f, 11.f, 18.f, 4.f);
@@ -1211,6 +1351,8 @@ void button(Graphics& g, RectF r, int id, const wchar_t* label, bool selected = 
              enabled ? (primary ? Color(255, 255, 255, 255) : Ink) : Muted, false, true);
 }
 const wchar_t* tooltipFor(int id) {
+    if (id >= 260 && id < 264)
+        return ui::kRedactionModes[id - 260];
     if (id >= 100 && id < 100 + ToolCount)
         return ui::kTooltips[id - 100];
     switch (id) {
@@ -1550,7 +1692,7 @@ void drawAnnotations(Graphics& g, const Layout& l, int first, int last) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     for (int i = first; i < last; i++)
-        drawItem(g, app.items[i]);
+        drawItem(g, app.items[i], true);
     g.Restore(state);
 }
 void drawSelection(Graphics& g, const Layout& l) {
@@ -1566,7 +1708,8 @@ void drawSelection(Graphics& g, const Layout& l) {
     REAL s = l.scale;
     Pen dotted(Blue, s);
     dotted.SetDashStyle(DashStyleDash);
-    if (item.tool == Tool::Text || item.tool == Tool::Rectangle || item.tool == Tool::Brush) {
+    if (item.tool == Tool::Text || item.tool == Tool::Rectangle || item.tool == Tool::Brush ||
+        item.tool == Tool::Redact) {
         RectF r = item.tool == Tool::Text
                       ? textRect(item)
                       : (item.tool == Tool::Brush ? item.strokeBounds : normalized(item.a, item.b));
@@ -1630,6 +1773,8 @@ void drawOcrOverlay(Graphics& g, const Layout& l) {
     Pen edge(Color(160, 0, 110, 235), 1 / l.zoom);
     for (const auto& line : ocrReport()->lines)
         for (const auto& word : line.words) {
+            if (hiddenOcrWord(word))
+                continue;
             bool selected = app.hasTextSelection && captura::wordInside(word, app.textArea);
             g.FillRectangle(selected ? &picked : &found, word.bounds);
             g.DrawRectangle(&edge, word.bounds);
@@ -1736,69 +1881,94 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
     if (app.tool == Tool::TextSelect) {
         drawOcrPanel(g, px, y, pw, s);
     } else {
-        if (t == Tool::Arrow) {
-            for (int i = 0; i < 2; i++) {
-                RectF r(px + i * (pw / 2), y, pw / 2 - 6 * s, 32 * s);
-                button(g, r, 200 + i, L"", st.arrow == i);
-                Style tiny = st;
-                tiny.size = 2 * s;
-                tiny.color = Ink.GetValue();
-                tiny.arrow = i;
-                drawArrow(g, {r.X + 12 * s, r.Y + 21 * s}, {r.GetRight() - 12 * s, r.Y + 11 * s},
-                          tiny);
+        if (t == Tool::Redact) {
+            const auto* recognition = ocrReport();
+            bool available = recognition && (recognition->state == captura::OcrState::Ready ||
+                                             recognition->state == captura::OcrState::Empty);
+            for (int mode = 0; mode < 4; ++mode) {
+                button(g, {px, y, pw, 30 * s}, 260 + mode, ui::kRedactionModes[mode],
+                       st.redaction == mode, false, mode < 2 || available);
+                y += 38 * s;
             }
-            y += 46 * s;
-        }
-        drawText(g, ui::kColor, {px, y, pw - 56 * s, 28 * s}, 12 * s);
-        RectF fg(px + pw - 48 * s, y, 48 * s, 28 * s);
-        button(g, fg, 210, L"", !app.fillTarget);
-        SolidBrush color(Color(st.color));
-        g.FillRectangle(&color, fg.X + 6 * s, fg.Y + 5 * s, fg.Width - 12 * s, fg.Height - 10 * s);
-        y += 40 * s;
-        bool fillable = t == Tool::Text || t == Tool::Rectangle || t == Tool::Counter;
-        if (fillable) {
-            drawText(g, ui::kBackground, {px, y, pw - 56 * s, 28 * s}, 12 * s);
-            RectF bg(px + pw - 48 * s, y, 48 * s, 28 * s);
-            button(g, bg, 211, L"", app.fillTarget);
-            RectF chip(bg.X + 6 * s, bg.Y + 5 * s, bg.Width - 12 * s, bg.Height - 10 * s);
-            if (st.filled) {
-                SolidBrush cb(Color(st.fill));
-                g.FillRectangle(&cb, chip);
-            } else
-                checker(g, chip);
+            const wchar_t* note =
+                available     ? L"Lorem replaces detected text before applying the effect."
+                : recognition ? L"Text replacement requires Windows OCR."
+                              : L"Recognizing text… Lorem modes will be available when ready.";
+            Font font(L"Segoe UI", 11 * s, FontStyleRegular, UnitPixel);
+            SolidBrush ink(Muted);
+            StringFormat wrap;
+            RectF area(px, y, pw, 65 * s);
+            g.DrawString(note, -1, &font, area, &wrap, &ink);
+            y += 75 * s;
+        } else {
+            if (t == Tool::Arrow) {
+                for (int i = 0; i < 2; i++) {
+                    RectF r(px + i * (pw / 2), y, pw / 2 - 6 * s, 32 * s);
+                    button(g, r, 200 + i, L"", st.arrow == i);
+                    Style tiny = st;
+                    tiny.size = 2 * s;
+                    tiny.color = Ink.GetValue();
+                    tiny.arrow = i;
+                    drawArrow(g, {r.X + 12 * s, r.Y + 21 * s},
+                              {r.GetRight() - 12 * s, r.Y + 11 * s}, tiny);
+                }
+                y += 46 * s;
+            }
+            drawText(g, ui::kColor, {px, y, pw - 56 * s, 28 * s}, 12 * s);
+            RectF fg(px + pw - 48 * s, y, 48 * s, 28 * s);
+            button(g, fg, 210, L"", !app.fillTarget);
+            SolidBrush color(Color(st.color));
+            g.FillRectangle(&color, fg.X + 6 * s, fg.Y + 5 * s, fg.Width - 12 * s,
+                            fg.Height - 10 * s);
             y += 40 * s;
-        }
-        ARGB paletteColor = (app.fillTarget || (t == Tool::Text && st.filled)) ? st.fill : st.color;
-        REAL tile = (pw - 5 * 6 * s) / 6;
-        for (int i = 0; i < 12; i++) {
-            RectF r(px + (i % 6) * (tile + 6 * s), y + (i / 6) * 34 * s, tile, 28 * s);
-            int id = i < 11 ? 300 + i : 213;
-            button(g, r, id, L"", i < 11 && paletteColor == Swatches[i]);
-            RectF inside(r.X + 3 * s, r.Y + 3 * s, r.Width - 6 * s, r.Height - 6 * s);
-            if (i < 11) {
-                SolidBrush c{Color(Swatches[i])};
-                g.FillRectangle(&c, inside);
-            } else {
-                LinearGradientBrush rainbow(inside, Color(255, 255, 0, 0), Color(255, 130, 0, 255),
-                                            LinearGradientModeHorizontal);
-                Color colors[] = {Color(255, 255, 0, 0),   Color(255, 255, 160, 0),
-                                  Color(255, 255, 240, 0), Color(255, 0, 190, 80),
-                                  Color(255, 0, 180, 240), Color(255, 40, 70, 240),
-                                  Color(255, 180, 0, 220)};
-                REAL positions[] = {0, 1 / 6.f, 2 / 6.f, 3 / 6.f, 4 / 6.f, 5 / 6.f, 1};
-                rainbow.SetInterpolationColors(colors, positions, 7);
-                g.FillRectangle(&rainbow, inside);
+            bool fillable = t == Tool::Text || t == Tool::Rectangle || t == Tool::Counter;
+            if (fillable) {
+                drawText(g, ui::kBackground, {px, y, pw - 56 * s, 28 * s}, 12 * s);
+                RectF bg(px + pw - 48 * s, y, 48 * s, 28 * s);
+                button(g, bg, 211, L"", app.fillTarget);
+                RectF chip(bg.X + 6 * s, bg.Y + 5 * s, bg.Width - 12 * s, bg.Height - 10 * s);
+                if (st.filled) {
+                    SolidBrush cb(Color(st.fill));
+                    g.FillRectangle(&cb, chip);
+                } else
+                    checker(g, chip);
+                y += 40 * s;
             }
-            if (app.hoverButton == id) {
-                SolidBrush feedback(Color(app.pressedButton == id ? 75 : 35, 255, 255, 255));
-                g.FillRectangle(&feedback, inside);
+            ARGB paletteColor =
+                (app.fillTarget || (t == Tool::Text && st.filled)) ? st.fill : st.color;
+            REAL tile = (pw - 5 * 6 * s) / 6;
+            for (int i = 0; i < 12; i++) {
+                RectF r(px + (i % 6) * (tile + 6 * s), y + (i / 6) * 34 * s, tile, 28 * s);
+                int id = i < 11 ? 300 + i : 213;
+                button(g, r, id, L"", i < 11 && paletteColor == Swatches[i]);
+                RectF inside(r.X + 3 * s, r.Y + 3 * s, r.Width - 6 * s, r.Height - 6 * s);
+                if (i < 11) {
+                    SolidBrush c{Color(Swatches[i])};
+                    g.FillRectangle(&c, inside);
+                } else {
+                    LinearGradientBrush rainbow(inside, Color(255, 255, 0, 0),
+                                                Color(255, 130, 0, 255),
+                                                LinearGradientModeHorizontal);
+                    Color colors[] = {Color(255, 255, 0, 0),   Color(255, 255, 160, 0),
+                                      Color(255, 255, 240, 0), Color(255, 0, 190, 80),
+                                      Color(255, 0, 180, 240), Color(255, 40, 70, 240),
+                                      Color(255, 180, 0, 220)};
+                    REAL positions[] = {0, 1 / 6.f, 2 / 6.f, 3 / 6.f, 4 / 6.f, 5 / 6.f, 1};
+                    rainbow.SetInterpolationColors(colors, positions, 7);
+                    g.FillRectangle(&rainbow, inside);
+                }
+                if (app.hoverButton == id) {
+                    SolidBrush feedback(Color(app.pressedButton == id ? 75 : 35, 255, 255, 255));
+                    g.FillRectangle(&feedback, inside);
+                }
             }
+            y += 78 * s;
         }
-        y += 78 * s;
         RectF slider(px + 6 * s, y, pw - 12 * s, 28 * s);
         app.buttons.push_back({slider, 222});
         REAL minSize = t == Tool::Text ? 8.f : (t == Tool::Counter ? 12.f : 1.f),
-             maxSize = t == Tool::Text ? 96.f : (t == Tool::Counter ? 64.f : 24.f);
+             maxSize =
+                 t == Tool::Text ? 96.f : (t == Tool::Counter || t == Tool::Redact ? 64.f : 24.f);
         Pen track(Color(255, 219, 227, 239), 4 * s);
         g.DrawLine(&track, slider.X, slider.Y + 14 * s, slider.GetRight(), slider.Y + 14 * s);
         REAL k = std::clamp((st.size - minSize) / (maxSize - minSize), 0.f, 1.f);
@@ -1811,6 +1981,15 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
         g.FillEllipse(&knob, slider.X + k * slider.Width - radius, slider.Y + 14 * s - radius,
                       2 * radius, 2 * radius);
         y += 43 * s;
+        if (t == Tool::Redact && validIndex(app.selected)) {
+            auto cache = app.items[app.selected].redactionCache;
+            if (cache && !cache->result.bitmap && !app.creating)
+                drawText(g, L"Effect unavailable; area covered.", {px, y, pw, 30 * s}, 10 * s,
+                         Muted);
+            else if (cache && st.redaction >= 2)
+                drawText(g, std::to_wstring(cache->result.replacedWords) + L" words replaced",
+                         {px, y, pw, 30 * s}, 11 * s, Muted);
+        }
         if (t == Tool::Counter && validIndex(app.selected)) {
             drawText(g, ui::kNumber, {px, y, pw - 72 * s, 28 * s}, 12 * s);
             button(g, {px + pw - 68 * s, y, 30 * s, 28 * s}, 230, L"−");
@@ -2075,7 +2254,22 @@ void copySelectedText() {
                 float(bounds.bottom - bounds.top)),
         visible;
     RectF::Intersect(visible, app.textArea, frame);
-    std::wstring text = app.hasTextSelection ? captura::selectedText(*ocrReport(), visible) : L"";
+    std::wstring text;
+    if (app.hasTextSelection)
+        for (const auto& line : ocrReport()->lines) {
+            std::wstring row;
+            for (const auto& word : line.words)
+                if (!hiddenOcrWord(word) && captura::wordInside(word, visible)) {
+                    if (!row.empty())
+                        row += L' ';
+                    row += word.text;
+                }
+            if (!row.empty()) {
+                if (!text.empty())
+                    text += L"\r\n";
+                text += row;
+            }
+        }
     if (text.empty()) {
         app.textFeedback = L"No text in the selected area.";
         invalidate();
@@ -2247,7 +2441,7 @@ void setTool(Tool tool) {
 }
 void changeSize(REAL value) {
     Tool t = activeTool();
-    REAL max = t == Tool::Text ? 96.f : (t == Tool::Counter ? 64.f : 24.f);
+    REAL max = t == Tool::Text ? 96.f : (t == Tool::Counter || t == Tool::Redact ? 64.f : 24.f);
     REAL minimum = t == Tool::Text ? 8.f : (t == Tool::Counter ? 12.f : 1.f);
     activeStyle().size = std::clamp(value, minimum, max);
     app.defaults[static_cast<int>(t)] = activeStyle();
@@ -2255,7 +2449,7 @@ void changeSize(REAL value) {
 }
 void sizeAt(PointF point) {
     Tool t = activeTool();
-    REAL max = t == Tool::Text ? 96.f : (t == Tool::Counter ? 64.f : 24.f);
+    REAL max = t == Tool::Text ? 96.f : (t == Tool::Counter || t == Tool::Redact ? 64.f : 24.f);
     REAL minimum = t == Tool::Text ? 8.f : (t == Tool::Counter ? 12.f : 1.f);
     changeSize(
         std::round(minimum + (point.X - (app.layout.side + 22 * app.layout.scale)) /
@@ -2277,7 +2471,17 @@ void perform(int id, PointF point) {
         saveImage(keyPressed(VK_SHIFT));
     else if (id >= 100 && id < 100 + ToolCount)
         setTool(static_cast<Tool>(id - 100));
-    else if (id >= 200 && id <= 201) {
+    else if (id >= 260 && id < 264) {
+        const auto* result = ocrReport();
+        if (id >= 262 && (!result || (result->state != captura::OcrState::Ready &&
+                                      result->state != captura::OcrState::Empty)))
+            return;
+        if (validIndex(app.selected))
+            checkpoint();
+        activeStyle().redaction = id - 260;
+        app.defaults[static_cast<int>(Tool::Redact)].redaction = id - 260;
+        invalidate();
+    } else if (id >= 200 && id <= 201) {
         if (validIndex(app.selected))
             checkpoint();
         activeStyle().arrow = id - 200;
@@ -2534,6 +2738,16 @@ void mouseDown(PointF screen) {
         invalidate();
         return;
     }
+    if (app.tool == Tool::Redact) {
+        p = {std::round(p.X), std::round(p.Y)};
+        const auto* recognized = ocrReport();
+        if (app.defaults[static_cast<int>(Tool::Redact)].redaction >= 2 &&
+            (!recognized || (recognized->state != captura::OcrState::Ready &&
+                             recognized->state != captura::OcrState::Empty))) {
+            report(L"Wait for Windows OCR before replacing text.");
+            return;
+        }
+    }
     app.dragHandle = -1;
     if (validIndex(app.selected)) {
         auto points = handles(app.items[app.selected]);
@@ -2549,6 +2763,8 @@ void mouseDown(PointF screen) {
         if (validIndex(app.selected)) {
             if (app.items[app.selected].tool == Tool::Text)
                 app.fillTarget = app.items[app.selected].style.filled;
+            if (app.items[app.selected].tool == Tool::Redact)
+                p = {std::round(p.X), std::round(p.Y)};
             checkpoint();
             app.gestureCanvas = canvasBounds();
             app.dragging = true;
@@ -2573,6 +2789,8 @@ void mouseDown(PointF screen) {
     item.tool = app.tool;
     item.a = item.b = p;
     item.style = app.defaults[static_cast<int>(app.tool)];
+    if (item.tool == Tool::Redact)
+        item.loremSeed = GetTickCount() ^ (++app.redactionSequence * 2654435761u);
     if (item.tool == Tool::Brush) {
         item.stroke.push_back(p);
         item.strokeBounds = {p.X, p.Y, 0, 0};
@@ -2693,6 +2911,11 @@ void mouseMove(PointF screen) {
         return;
     PointF p = toImage(screen, false);
     Item& item = app.items[app.selected];
+    if (item.tool == Tool::Redact) {
+        if (app.creating)
+            p = toImage(screen);
+        p = {std::round(p.X), std::round(p.Y)};
+    }
     RECT oldArea = annotationBounds(item, app.layout);
     REAL previousSize = item.style.size;
     if (app.creating && item.tool == Tool::Brush) {
@@ -2707,7 +2930,7 @@ void mouseMove(PointF screen) {
     } else if (app.creating) {
         item.b = p;
         if (keyPressed(VK_SHIFT)) {
-            if (item.tool == Tool::Rectangle) {
+            if (item.tool == Tool::Rectangle || item.tool == Tool::Redact) {
                 REAL dx = p.X - item.a.X, dy = p.Y - item.a.Y,
                      v = std::min(std::abs(dx), std::abs(dy));
                 item.b = {item.a.X + (dx < 0 ? -v : v), item.a.Y + (dy < 0 ? -v : v)};
@@ -2738,7 +2961,7 @@ void mouseMove(PointF screen) {
             item.a = p;
         else
             item.b = p;
-    } else if (item.tool == Tool::Rectangle) {
+    } else if (item.tool == Tool::Rectangle || item.tool == Tool::Redact) {
         RectF r = normalized(app.initialItem.a, app.initialItem.b);
         std::array<PointF, 4> corners = {PointF(r.X, r.Y), PointF(r.GetRight(), r.Y),
                                          PointF(r.GetRight(), r.GetBottom()),
@@ -2787,8 +3010,15 @@ void mouseUp() {
                            ink.GetRight() > frame.right || ink.GetBottom() > frame.bottom;
         }
     }
-    if (app.creating && validIndex(app.selected) && app.items[app.selected].tool != Tool::Brush &&
-        distance(app.items[app.selected].a, app.items[app.selected].b) < 2) {
+    bool discard = false;
+    if (app.creating && validIndex(app.selected)) {
+        const Item& item = app.items[app.selected];
+        RectF area = normalized(item.a, item.b);
+        discard = item.tool == Tool::Redact
+                      ? area.Width < 1 || area.Height < 1
+                      : item.tool != Tool::Brush && distance(item.a, item.b) < 2;
+    }
+    if (discard) {
         app.items.erase(app.items.begin() + app.selected);
         app.selected = -1;
     }
@@ -3785,6 +4015,9 @@ void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPre
     case 'O':
         setTool(Tool::TextSelect);
         break;
+    case 'B':
+        setTool(Tool::Redact);
+        break;
     }
 }
 void captureHotkey(bool editorActive) {
@@ -4022,6 +4255,14 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         sourceRaster.reset();
         ocrService.shutdown();
         app.ocr.reset();
+        // Effect bitmaps must be destroyed before GdiplusShutdown, including
+        // caches retained by history and the last pointer gesture snapshot.
+        app.items.clear();
+        app.undo.clear();
+        app.redo.clear();
+        app.initialItem = {};
+        app.image.reset();
+        app.frozen.reset();
         PostQuitMessage(0);
         return 0;
     }

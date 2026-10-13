@@ -32,6 +32,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `src/ui_text.h`: English interface text and help.
 - `src/capture_shortcut.h`: shortcut validation, display, atomic preference storage, and registration replacement.
 - `src/ocr.h`, `src/ocr.cpp`: cancellable background Windows OCR and measurement, with immutable bitmap snapshots and plain text/geometry results.
+- `src/redaction.h`, `src/redaction.cpp`: regional Gaussian blur, area-averaged pixelation, and color/font-size estimation for Lorem substitution.
 - `src/resource.h`: native dialog control identifiers.
 - `src/app.rc`, `src/app.manifest`: version and Windows application resources.
 - `tests/integration.inc`: native integration suite included only in test builds.
@@ -40,6 +41,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `tests/navigation.inc`: middle-button and wheel input, navigation caches, quality restoration, clipping, bounded zoom memory, and GDI resource tests. Writes `navigation-performance.txt` with timings for a retained 4K desktop and selected frame.
 - `tests/navigation_bounds.inc`: actual scroll and drag boundary behavior for smaller, larger, cropped, and expanded frames, including reversal, zoom, and window resize.
 - `tests/ocr.inc`: text geometry, Unicode clipboard hooks, cancellation, retained-desktop selection, and real Windows OCR on synthetic screenshots. Writes `ocr-editor.png` and `ocr-benchmark.txt`.
+- `tests/redaction.inc`: exact clipping, partial glyphs, color estimates, opacity, pixel averages, editing/history, dependent annotations, protected OCR copying, real OCR on substituted pixels, preview/export quality, and shutdown. Writes redaction previews and `redaction-performance.txt`.
 - `docs/assets`: synthetic screenshots used in the product README.
 - `build.ps1`, `test.ps1`: build and verification entry points.
 
@@ -62,6 +64,16 @@ Select text draws overlays only in the current visible frame. Selection uses wor
 Wall time uses QueryPerformanceCounter and includes snapshot preparation and any worker queue delay. Recognition time sums the async API waits. GetProcessTimes measures CPU for the **whole process**, not an isolated OCR thread; divide CPU time by elapsed time and logical processor count for average Task Manager-style CPU percentage. Working set is sampled during recognition, including the pre-job baseline; reported growth is relative to that baseline. These are diagnostic process metrics and can include concurrent rendering or previous recognition. CPU counters have finite granularity and RAM samples can miss short peaks. Screenshots, recognized text, and metrics are not automatically persisted or sent anywhere.
 
 No OCR model is bundled or installed. The engine uses the user's Windows OCR languages and falls back to the first available language. Missing languages or API failures produce an inline unavailable/error state. The standalone unpackaged probe and integration tests work on the local Windows 11 host with `en-US`; this does not establish compatibility with every supported Windows build. See `examples/windows-ocr` for the minimal probe.
+
+## Redaction preview
+
+Redaction rectangles are editable items with immutable, shared raster caches. Cache keys cover region, strength, mode, source, completed OCR, background fill, preview quality, and the content of preceding annotations. History can share caches safely because changed parameters create a new cache. Preview painting uses bounded rasters during gestures; image copy and PNG export always request full-resolution pixels, including during a gesture. Shutdown releases caches in items, history, and gesture snapshots before GDI+ stops.
+
+Gaussian uses Windows [GDI+ Blur](https://learn.microsoft.com/en-us/windows/win32/api/gdipluseffects/nl-gdipluseffects-blur) and [BlurParams](https://learn.microsoft.com/en-us/windows/win32/api/gdipluseffects/ns-gdipluseffects-blurparams). Pixelation averages each selected-region block, then writes that color uniformly; rendering uses nearest-neighbor upsampling. Both strengths are in original-image pixels. Patches are opaque and drawn with source-copy compositing so original text cannot show through a blurred edge. The source screenshot remains unchanged; only the processed patch is composed into exports.
+
+Lorem modes consider **any intersection** with an OCR word, including a selection that misses its center or splits a glyph. An expanded context raster samples a 4-pixel ring for the dominant background and contrasting glyph pixels for foreground color, grouped into RGB buckets to limit antialiasing noise. Original word regions are filled within the selected patch before replacement glyphs are drawn. Lorem tokens use a stable per-item seed, never copy the original token, and match the OCR ink height with width limited by the word box. This approximates font size/color; font family, complex backgrounds, and missed or inaccurate OCR boxes remain heuristic limits. Undetected text receives the chosen blur or pixelation without substitution. This feature is not a guarantee of irreversible removal of every sensitive pattern.
+
+Only selected pixels are written: context may be read beyond the selection for estimation, but the returned patch is exactly the chosen rectangle. Original words intersecting any redaction are excluded from OCR highlights and original-text copying. Lorem controls require completed OCR; if a Lorem effect cannot be prepared, an opaque cover is exported instead of silently revealing or merely blurring the original.
 
 Area and window selection transfer the complete frozen desktop bitmap into the editor without cloning or cropping it. The initial selection is stored as the canvas frame and trim baseline in desktop-bitmap coordinates. The renderer clips to that frame, and expansion reveals pixels already in the source. Synthetic fill is used only outside the complete bitmap. PNG and clipboard export translate and clip the source and annotations to the current visible frame.
 

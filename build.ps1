@@ -51,11 +51,11 @@ try {
     $options = @(
         '/nologo', '/std:c++17', '/utf-8', '/W4', '/O1', '/Os', '/GL', '/Gy', '/Gw',
         '/MT', '/EHsc', '/DNDEBUG', '/DUNICODE', '/D_UNICODE',
-        '/DWIN32_LEAN_AND_MEAN', '/DNOMINMAX'
+        '/DWIN32_LEAN_AND_MEAN', '/DNOMINMAX', '/DGDIPVER=0x0110'
     )
     if ($WithTests) { $options += '/DCAPTURA_TEST' }
     $options += @(
-        'main.cpp', 'ocr.cpp', "/Fo$buildDirectory\", "/Fe$output\Captura.exe",
+        'main.cpp', 'ocr.cpp', 'redaction.cpp', "/Fo$buildDirectory\", "/Fe$output\Captura.exe",
         '/link', "$buildDirectory\app.res", '/SUBSYSTEM:WINDOWS', '/MACHINE:X64',
         '/LTCG', '/OPT:REF', '/OPT:ICF', '/INCREMENTAL:NO', '/DYNAMICBASE',
         '/NXCOMPAT', '/HIGHENTROPYVA', '/MANIFEST:NO',

@@ -3,14 +3,16 @@
 // The interface is English regardless of the system language.
 namespace ui {
 inline constexpr wchar_t kAppName[] = L"Captura";
-inline constexpr const wchar_t* kTooltips[] = {L"Select (V)",    L"Arrow (A)",      L"Text (T)",
-                                               L"Rectangle (R)", L"Line (L)",       L"Counter (C)",
-                                               L"Brush (P)",     L"Select text (O)"};
+inline constexpr const wchar_t* kTooltips[] = {L"Select (V)",    L"Arrow (A)",       L"Text (T)",
+                                               L"Rectangle (R)", L"Line (L)",        L"Counter (C)",
+                                               L"Brush (P)",     L"Select text (O)", L"Redact (B)"};
 inline constexpr wchar_t kUndo[] = L"Undo (Ctrl+Z)";
 inline constexpr wchar_t kRedo[] = L"Redo (Ctrl+Y)";
 inline constexpr wchar_t kCopy[] = L"Copy (Ctrl+C)";
 inline constexpr wchar_t kSave[] = L"Save (Ctrl+S)";
 inline constexpr wchar_t kOneHead[] = L"One arrowhead";
+inline constexpr const wchar_t* kRedactionModes[] = {L"Gaussian", L"Pixelate", L"Lorem + Gaussian",
+                                                     L"Lorem + Pixelate"};
 inline constexpr wchar_t kTwoHeads[] = L"Two arrowheads";
 inline constexpr wchar_t kColor[] = L"Color";
 inline constexpr wchar_t kBackground[] = L"Background";
@@ -79,7 +81,14 @@ inline constexpr wchar_t kHelp[] =
     L"Esc: cancel capture or selection\n\n"
     L"TOOLS\n"
     L"V Select   A Arrow   T Text\n"
-    L"R Rectangle   L Line   C Counter   P Brush   O Select text\n\n"
+    L"R Rectangle   L Line   C Counter   P Brush   O Select text   B Redact\n\n"
+    L"REDACT\n"
+    L"B: drag a rectangle to hide an area. Choose Gaussian or Pixelate.\n"
+    L"Lorem variants replace detected text before blurring or pixelating.\n"
+    L"Move the slider right for stronger blur or larger pixel blocks.\n"
+    L"V: move or resize a redaction. Del removes it. Undo restores it.\n"
+    L"Text replacement requires completed Windows OCR and covers detected words only.\n"
+    L"Everything outside the selected rectangle stays unchanged.\n\n"
     L"TEXT SELECTION (PREVIEW)\n"
     L"Windows OCR starts in the background when a capture opens.\n"
     L"Select text highlights recognized words. Drag an area to copy its text.\n"
@@ -90,7 +99,7 @@ inline constexpr wchar_t kHelp[] =
     L"Ctrl + C: copy image\n"
     L"Ctrl + S: save PNG to Pictures\\Screenshots\n"
     L"Shift + click Save or Ctrl + Shift + S in the editor: choose a destination\n"
-    L"Successful copying or saving closes the editor. Captura stays in the tray.\n\n"
+    L"Successful image copying or saving closes the editor. Captura stays in the tray.\n\n"
     L"EDIT\n"
     L"Ctrl + Z: undo   Ctrl + Y / Ctrl + Shift + Z: redo\n"
     L"Del: delete   Ctrl + D: duplicate\n"
