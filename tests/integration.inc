@@ -1,4 +1,8 @@
 // Included only by builds with CAPTURA_TEST; never part of the release binary.
+#include "shortcut.inc"
+#include "retained_desktop.inc"
+#include "navigation.inc"
+#include "navigation_bounds.inc"
 std::unique_ptr<Bitmap> fixture() {
     auto bitmap = std::make_unique<Bitmap>(1000, 600, PixelFormat32bppARGB);
     Graphics g(bitmap.get());
@@ -124,6 +128,7 @@ int selfTest(const std::wstring& directory) {
     check(app.main != nullptr, L"Native hidden editor creation");
     if (!app.main)
         return 2;
+    testCaptureShortcuts(directory, check);
     check(app.defaults[1].size == 12 && app.defaults[3].size == 12 && app.defaults[4].size == 12 &&
               app.defaults[6].size == 12,
           L"All stroke tools, including brush, start at 12 pixels");
@@ -430,9 +435,11 @@ int selfTest(const std::wstring& directory) {
     SendMessageW(areaOverlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(300, 250));
     SendMessageW(areaOverlay, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(100, 80));
     SendMessageW(areaOverlay, WM_LBUTTONUP, 0, MAKELPARAM(100, 80));
-    check(!app.overlay && app.image && app.image->GetWidth() == 200 &&
-              app.image->GetHeight() == 170,
-          L"Area overlay messages finish frozen crop");
+    RECT areaFrame = canvasBounds();
+    check(!app.overlay && !app.frozen && app.image && app.image->GetWidth() == 1000 &&
+              app.image->GetHeight() == 600 && areaFrame.left == 100 && areaFrame.top == 80 &&
+              areaFrame.right == 300 && areaFrame.bottom == 250,
+          L"Area overlay keeps frozen desktop and establishes exact initial frame");
     HWND windowOverlay = makeOverlay();
     app.windows = {{{70, 80, 450, 390}}, {{0, 0, 900, 500}}};
     SendMessageW(windowOverlay, WM_KEYDOWN, VK_SPACE, 0);
@@ -440,16 +447,21 @@ int selfTest(const std::wstring& directory) {
     SendMessageW(windowOverlay, WM_MOUSEMOVE, 0, MAKELPARAM(100, 100));
     check(app.hover == 0, L"Overlay hover selects foremost window");
     SendMessageW(windowOverlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(100, 100));
-    check(!app.overlay && app.image && app.image->GetWidth() == 380 &&
-              app.image->GetHeight() == 310,
-          L"Window click crops exact frozen frame");
+    RECT windowFrame = canvasBounds();
+    check(!app.overlay && app.image && app.image->GetWidth() == 1000 &&
+              app.image->GetHeight() == 600 && windowFrame.left == 70 && windowFrame.top == 80 &&
+              windowFrame.right == 450 && windowFrame.bottom == 390,
+          L"Window click keeps frozen desktop and establishes window frame");
     HWND cancelOverlay = makeOverlay();
     SendMessageW(cancelOverlay, WM_KEYDOWN, VK_ESCAPE, 0);
-    check(!app.overlay && !app.frozen && app.image->GetWidth() == 380,
+    RECT canceledFrame = canvasBounds();
+    check(!app.overlay && !app.frozen && app.image->GetWidth() == 1000 &&
+              EqualRect(&canceledFrame, &windowFrame),
           L"Escape cancels selector and preserves previous capture");
     check(!IsWindowVisible(app.main), L"Integration tests leave editor hidden");
     app.image = fixture();
     // Real down/move/up messages exercise the initial held-button gesture.
+    app.canvas = {};
     app.items.clear();
     app.undo.clear();
     app.redo.clear();
@@ -1155,8 +1167,10 @@ int selfTest(const std::wstring& directory) {
     app.dragStart = {100, 100};
     app.selection = {100, 100, 200, 200};
     SendMessageW(app.overlay, WM_LBUTTONUP, 0, MAKELPARAM(420, 360));
-    check(app.image->GetWidth() == 320 && app.image->GetHeight() == 260,
-          L"Area crop uses actual release position without a final move message");
+    RECT releasedFrame = canvasBounds();
+    check(releasedFrame.left == 100 && releasedFrame.top == 100 && releasedFrame.right == 420 &&
+              releasedFrame.bottom == 360,
+          L"Initial frame uses actual release position without a final move message");
     check(!overlayCache.original.dc && !overlayCache.dark.dc && !overlayBuffer.dc,
           L"Completing capture releases selector buffers");
 
@@ -1229,6 +1243,16 @@ int selfTest(const std::wstring& directory) {
     captureHotkey(false);
     check(app.capturePending, L"Global capture hotkey outside editor still starts capture");
     cancelCapture();
+    app.captureShortcut = {MOD_CONTROL | MOD_ALT, 'K'};
+    dialogsBefore = testSaveDialogs;
+    captureHotkey(true);
+    check(app.capturePending && testSaveDialogs == dialogsBefore,
+          L"Custom shortcut starts capture in editor without replacing Save As binding");
+    cancelCapture();
+    keyDown('S', true, true);
+    check(testSaveDialogs == dialogsBefore + 1,
+          L"Ctrl Shift S still chooses save destination after capture shortcut changes");
+    app.captureShortcut = {};
     testClipboardSuccess = true;
     exportsBefore = testExportCompletions;
     perform(4);
@@ -2015,6 +2039,9 @@ int selfTest(const std::wstring& directory) {
         renderEditor(g, app.main);
         encodePng(restoredPreview, (directory + L"\\restored-editor.png").c_str());
     }
+    testRetainedDesktop(directory, check);
+    testNavigation(directory, check);
+    testNavigationBounds(check);
     log += L"\r\n" + std::to_wstring(checks) + L" checks, " + std::to_wstring(failures) +
            L" failures\r\n";
     FILE* file = nullptr;

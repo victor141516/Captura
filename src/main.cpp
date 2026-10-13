@@ -17,14 +17,17 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdio>
+#include <new>
 
 #include "ui_text.h"
+#include "resource.h"
+#include "capture_shortcut.h"
 
 using namespace Gdiplus;
 constexpr wchar_t AppClass[] = L"Captura.Native.Editor.1";
 constexpr wchar_t OverlayClass[] = L"Captura.Native.Overlay.1";
 constexpr UINT TrayMessage = WM_APP + 1, ActivateMessage = WM_APP + 2;
-constexpr int HotkeyId = 1;
+constexpr UINT_PTR ZoomRefineTimer = 2;
 constexpr REAL Pi = 3.14159265358979f;
 const Color Ink(255, 35, 43, 55), Muted(255, 103, 114, 130), Blue(255, 0, 110, 235);
 const std::array<ARGB, 11> Swatches = {0xffef3e42, 0xfff28c28, 0xffffd23f, 0xff16a765,
@@ -76,6 +79,7 @@ struct Layout {
 struct AppState {
     HINSTANCE instance = nullptr;
     HWND main = nullptr, overlay = nullptr, edit = nullptr, tooltip = nullptr;
+    HWND shortcutDialog = nullptr;
     HICON icon = nullptr;
     HFONT editFont = nullptr;
     ULONG_PTR gdiplus = 0;
@@ -100,11 +104,18 @@ struct AppState {
     bool dragging = false, creating = false, panning = false, background = false, sizing = false;
     bool windowMode = false, selecting = false, capturePending = false, captureRestore = false;
     bool hotkey = false, tray = false, test = false, fillTarget = false;
+    bool zooming = false;
+#ifdef CAPTURA_TEST
+    bool shortcutPreview = false;
+#endif
     PointF dragStart{}, pan{}, initialPan{};
     Item initialItem;
     REAL userZoom = 0;
     Layout layout;
-    std::wstring status = ui::kCaptureHint;
+    CaptureShortcut captureShortcut;
+    int hotkeyId = 1;
+    std::wstring settingsPath;
+    std::wstring status;
     COLORREF customColors[16]{};
     ARGB sharedColor = 0xffef3e42;
     std::wstring editOriginal;
@@ -114,6 +125,16 @@ struct AppState {
     bool trackingMouse = false;
     std::array<bool, 512> tooltipAdded{};
 } app;
+
+std::wstring captureHint() {
+    return captureShortcutName(app.captureShortcut) + L" to capture";
+}
+std::wstring helpText() {
+    std::wstring text = ui::kHelp;
+    const std::wstring token = L"{capture-shortcut}";
+    text.replace(text.find(token), token.size(), captureShortcutName(app.captureShortcut));
+    return text;
+}
 
 // Reuse the paint buffers instead of allocating a screen-sized bitmap for
 // every mouse movement. Their GDI resources are released at window shutdown.
@@ -171,15 +192,70 @@ struct CaptureViewCache {
     std::unique_ptr<CachedBitmap> native;
     const Bitmap* source = nullptr;
     Layout layout;
+    RECT extent{};
+    PointF phase{};
+    InterpolationMode interpolation = InterpolationModeInvalid;
     unsigned builds = 0;
     void reset() {
         native.reset();
         bitmap.reset();
         source = nullptr;
+        extent = {};
     }
 } captureView;
+
+struct NativeSourceRaster {
+    std::unique_ptr<ARGB[]> pixels;
+    BITMAPINFO info{};
+    int width = 0, height = 0;
+    const Bitmap* source = nullptr;
+    unsigned builds = 0;
+    void reset() {
+        pixels.reset();
+        source = nullptr;
+        width = height = 0;
+    }
+    bool ensure(Bitmap* image) {
+        if (!image)
+            return false;
+        if (source == image && pixels)
+            return true;
+        reset();
+        width = static_cast<int>(image->GetWidth());
+        height = static_cast<int>(image->GetHeight());
+        size_t count = static_cast<size_t>(width) * height;
+        pixels.reset(new (std::nothrow) ARGB[count]);
+        BitmapData data{};
+        Rect whole(0, 0, width, height);
+        if (!pixels ||
+            image->LockBits(&whole, ImageLockModeRead, PixelFormat32bppRGB, &data) != Ok) {
+            reset();
+            return false;
+        }
+        for (int y = 0; y < height; y++)
+            memcpy(pixels.get() + static_cast<size_t>(y) * width,
+                   static_cast<const BYTE*>(data.Scan0) + static_cast<ptrdiff_t>(y) * data.Stride,
+                   static_cast<size_t>(width) * 4);
+        image->UnlockBits(&data);
+        info = {};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        source = image;
+        ++builds;
+        return true;
+    }
+} sourceRaster;
+
 PaintBuffer dragBackground;
+PaintBuffer navigationBackground;
 unsigned long long sceneRevision = 1, dragRevision = 0;
+unsigned long long navigationRevision = 0;
+Layout navigationLayout;
+int navigationHover = -2, navigationPressed = -2;
 int cachedSelection = -1;
 Layout dragLayout;
 bool sameView(const Layout& a, const Layout& b) {
@@ -862,8 +938,8 @@ bool trimCanvasToItems() {
         needed.right = std::max(needed.right, visible.right);
         needed.bottom = std::max(needed.bottom, visible.bottom);
     }
-    // Only remove temporary margins. The original capture and the visible
-    // bounds of every annotation, including strokes and arrowheads, remain.
+    // Only remove temporary margins. Keep the chosen frame and visible
+    // annotation bounds, including strokes and arrowheads.
     RECT next{};
     IntersectRect(&next, &previous, &needed);
     if (EqualRect(&previous, &next))
@@ -903,6 +979,32 @@ Layout calculateLayout(HWND hwnd) {
         }
     }
     return l;
+}
+PointF boundedPan(PointF pan, const Layout& view, RECT frame) {
+    // A small frame stays wholly inside the viewport. A larger one can scroll
+    // through all its content, stopping when the opposite edge reaches the viewport.
+    REAL x = std::abs(view.canvas.Width - (frame.right - frame.left) * view.zoom) / 2,
+         y = std::abs(view.canvas.Height - (frame.bottom - frame.top) * view.zoom) / 2;
+    return {std::clamp(pan.X, -x, x), std::clamp(pan.Y, -y, y)};
+}
+void constrainPan() {
+    if (app.image && !app.pinnedCanvas)
+        app.pan = boundedPan(app.pan, calculateLayout(app.main), canvasBounds());
+}
+void presentNavigation() {
+    if (!app.main)
+        return;
+    constrainPan();
+    Layout layout = calculateLayout(app.main);
+    RECT dirty{static_cast<LONG>(std::floor(layout.canvas.X)),
+               static_cast<LONG>(std::floor(layout.canvas.Y)),
+               static_cast<LONG>(std::ceil(layout.canvas.GetRight())),
+               static_cast<LONG>(std::ceil(layout.canvas.GetBottom()))};
+    InvalidateRect(app.main, &dirty, FALSE);
+    // Mouse moves are coalesced by Windows. Present the latest position instead
+    // of waiting behind a continuous input stream for a low-priority WM_PAINT.
+    if (!app.test && IsWindowVisible(app.main))
+        UpdateWindow(app.main);
 }
 void centerExpandedCanvas() {
     if (!app.pinnedCanvas)
@@ -1107,7 +1209,7 @@ const wchar_t* tooltipFor(int id) {
     }
 }
 void initTooltips() {
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES | ICC_LINK_CLASS};
     InitCommonControlsEx(&controls);
     app.tooltip =
         CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
@@ -1255,6 +1357,114 @@ void checker(Graphics& g, RectF r) {
                 g.FillRectangle(&gray, x, y, std::min(5.f, r.GetRight() - x),
                                 std::min(5.f, r.GetBottom() - y));
 }
+InterpolationMode captureInterpolation(const Layout& l) {
+    return l.zoom >= 1
+               ? InterpolationModeNearestNeighbor
+               : (app.zooming ? InterpolationModeBilinear : InterpolationModeHighQualityBicubic);
+}
+
+bool drawZoomPreview(Graphics& g, const Layout& l) {
+    // The immutable capture is converted to a native raster once, before any
+    // interaction. Native stretching avoids GDI+'s full-source conversion on
+    // every wheel event. The high-quality view is restored after wheel idle.
+    Region clip;
+    g.GetClip(&clip);
+    HRGN region = clip.GetHRGN(&g);
+    HDC dc = g.GetHDC();
+    if (!dc) {
+        if (region)
+            DeleteObject(region);
+        return false;
+    }
+    bool drawn = false;
+    if (region && sourceRaster.ensure(app.image.get())) {
+        int state = SaveDC(dc);
+        ExtSelectClipRgn(dc, region, RGN_AND);
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        int lines = StretchDIBits(
+            dc, static_cast<int>(std::floor(l.imageX)), static_cast<int>(std::floor(l.imageY)),
+            std::max(1, static_cast<int>(std::round(sourceRaster.width * l.zoom))),
+            std::max(1, static_cast<int>(std::round(sourceRaster.height * l.zoom))), 0, 0,
+            sourceRaster.width, sourceRaster.height, sourceRaster.pixels.get(), &sourceRaster.info,
+            DIB_RGB_COLORS, SRCCOPY);
+        drawn = lines != 0 && lines != GDI_ERROR;
+        RestoreDC(dc, state);
+    }
+    if (region)
+        DeleteObject(region);
+    g.ReleaseHDC(dc);
+    return drawn;
+}
+
+bool prepareCaptureView(Graphics& target, const Layout& l, int originX, int originY) {
+    const PointF phase{l.imageX - originX, l.imageY - originY};
+    const InterpolationMode interpolation = captureInterpolation(l);
+    // Cache coordinates are relative to the image's integer screen origin, so
+    // a pan translates the raster instead of invalidating its expensive scaling.
+    RECT full{-2, -2, static_cast<LONG>(std::ceil(app.image->GetWidth() * l.zoom)) + 3,
+              static_cast<LONG>(std::ceil(app.image->GetHeight() * l.zoom)) + 3};
+    RECT viewport{static_cast<LONG>(std::floor(l.canvas.X)) - originX,
+                  static_cast<LONG>(std::floor(l.canvas.Y)) - originY,
+                  static_cast<LONG>(std::ceil(l.canvas.GetRight())) - originX,
+                  static_cast<LONG>(std::ceil(l.canvas.GetBottom())) - originY},
+        needed{};
+    if (!IntersectRect(&needed, &viewport, &full))
+        return false;
+    const RECT& previous = captureView.extent;
+    if (captureView.native && captureView.source == app.image.get() &&
+        captureView.layout.zoom == l.zoom && captureView.phase.X == phase.X &&
+        captureView.phase.Y == phase.Y && captureView.interpolation == interpolation &&
+        previous.left <= needed.left && previous.top <= needed.top &&
+        previous.right >= needed.right && previous.bottom >= needed.bottom)
+        return true;
+
+    RECT extent = needed;
+    if (!app.zooming) {
+        // Small scaled images are retained in full. At large zoom, keep a
+        // bounded viewport tile with overscan, never a desktop-sized 8x bitmap.
+        long long fullPixels =
+            static_cast<long long>(full.right - full.left) * (full.bottom - full.top);
+        if (fullPixels <= 4 * 1024 * 1024)
+            extent = full;
+        else {
+            InflateRect(&extent, 384, 384);
+            IntersectRect(&extent, &extent, &full);
+        }
+    }
+    int width = extent.right - extent.left, height = extent.bottom - extent.top;
+    if (static_cast<long long>(width) * height > 16 * 1024 * 1024)
+        return false;
+    captureView.reset();
+    captureView.bitmap = std::make_unique<Bitmap>(width, height, PixelFormat32bppPARGB);
+    if (captureView.bitmap->GetLastStatus() != Ok) {
+        captureView.reset();
+        return false;
+    }
+    {
+        Graphics view(captureView.bitmap.get());
+        view.Clear(Color(0, 0, 0, 0));
+        view.TranslateTransform(phase.X - extent.left, phase.Y - extent.top);
+        view.SetInterpolationMode(interpolation);
+        view.DrawImage(app.image.get(),
+                       RectF(0, 0, app.image->GetWidth() * l.zoom, app.image->GetHeight() * l.zoom),
+                       0, 0, static_cast<REAL>(app.image->GetWidth()),
+                       static_cast<REAL>(app.image->GetHeight()), UnitPixel);
+    }
+    captureView.native = std::make_unique<CachedBitmap>(captureView.bitmap.get(), &target);
+    if (captureView.native->GetLastStatus() != Ok) {
+        captureView.reset();
+        return false;
+    }
+    captureView.source = app.image.get();
+    captureView.layout = l;
+    captureView.extent = extent;
+    captureView.phase = phase;
+    captureView.interpolation = interpolation;
+    ++captureView.builds;
+    return true;
+}
+
 void drawCapture(Graphics& g, const Layout& l, bool cached) {
     GraphicsState saved = g.Save();
     g.SetClip(l.canvas, CombineModeIntersect);
@@ -1267,46 +1477,21 @@ void drawCapture(Graphics& g, const Layout& l, bool cached) {
     SolidBrush background(Color(app.canvas.color));
     g.FillRectangle(&background, canvas);
     g.SetClip(canvas, CombineModeIntersect);
+    if (app.zooming && drawZoomPreview(g, l)) {
+        g.Restore(saved);
+        return;
+    }
     if (cached) {
-        if (!captureView.native || captureView.source != app.image.get() ||
-            !sameView(captureView.layout, l)) {
-            captureView.reset();
-            const int x = static_cast<int>(std::floor(l.canvas.X)),
-                      y = static_cast<int>(std::floor(l.canvas.Y));
-            const int w = static_cast<int>(std::ceil(l.canvas.GetRight())) - x,
-                      h = static_cast<int>(std::ceil(l.canvas.GetBottom())) - y;
-            captureView.bitmap =
-                std::make_unique<Bitmap>(std::max(1, w), std::max(1, h), PixelFormat32bppPARGB);
-            if (captureView.bitmap->GetLastStatus() == Ok) {
-                {
-                    Graphics view(captureView.bitmap.get());
-                    view.Clear(Color(0, 0, 0, 0));
-                    view.TranslateTransform(static_cast<REAL>(-x), static_cast<REAL>(-y));
-                    view.SetInterpolationMode(l.zoom >= 1 ? InterpolationModeNearestNeighbor
-                                                          : InterpolationModeHighQualityBicubic);
-                    view.DrawImage(app.image.get(),
-                                   RectF(l.imageX, l.imageY, app.image->GetWidth() * l.zoom,
-                                         app.image->GetHeight() * l.zoom),
-                                   0, 0, static_cast<REAL>(app.image->GetWidth()),
-                                   static_cast<REAL>(app.image->GetHeight()), UnitPixel);
-                }
-                captureView.native = std::make_unique<CachedBitmap>(captureView.bitmap.get(), &g);
-                if (captureView.native->GetLastStatus() != Ok)
-                    captureView.native.reset();
-            }
-            captureView.source = app.image.get();
-            captureView.layout = l;
-            ++captureView.builds;
-        }
-        if (captureView.native &&
-            g.DrawCachedBitmap(captureView.native.get(), static_cast<int>(std::floor(l.canvas.X)),
-                               static_cast<int>(std::floor(l.canvas.Y))) == Ok) {
+        int originX = static_cast<int>(std::floor(l.imageX)),
+            originY = static_cast<int>(std::floor(l.imageY));
+        if (prepareCaptureView(g, l, originX, originY) &&
+            g.DrawCachedBitmap(captureView.native.get(), originX + captureView.extent.left,
+                               originY + captureView.extent.top) == Ok) {
             g.Restore(saved);
             return;
         }
     }
-    g.SetInterpolationMode(l.zoom >= 1 ? InterpolationModeNearestNeighbor
-                                       : InterpolationModeHighQualityBicubic);
+    g.SetInterpolationMode(captureInterpolation(l));
     g.DrawImage(
         app.image.get(),
         RectF(l.imageX, l.imageY, app.image->GetWidth() * l.zoom, app.image->GetHeight() * l.zoom),
@@ -1393,7 +1578,7 @@ void drawCanvasHandles(Graphics& g, const Layout& l) {
     g.Restore(saved);
 }
 void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true,
-                  bool cachedCapture = false) {
+                  bool cachedCapture = false, bool chromeOnly = false) {
     app.layout = calculateLayout(hwnd);
     auto l = app.layout;
     REAL s = l.scale;
@@ -1430,17 +1615,19 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
     g.DrawLine(&separator, 0.f, 56 * s, l.width, 56 * s);
     g.DrawLine(&separator, l.side, 56 * s, l.side, l.height - 30 * s);
     if (app.image) {
-        drawCapture(g, l, cachedCapture);
-        drawAnnotations(g, l, 0, before < 0 ? static_cast<int>(app.items.size()) : before);
-        if (selection) {
-            drawSelection(g, l);
-            drawCanvasHandles(g, l);
+        if (!chromeOnly) {
+            drawCapture(g, l, cachedCapture);
+            drawAnnotations(g, l, 0, before < 0 ? static_cast<int>(app.items.size()) : before);
+            if (selection) {
+                drawSelection(g, l);
+                drawCanvasHandles(g, l);
+            }
         }
     } else {
         drawText(g, ui::kEmptyTitle, {16 * s, 140 * s, l.side - 32 * s, 45 * s}, 24 * s, Ink, true,
                  true);
-        drawText(g, ui::kCaptureKeys, {16 * s, 197 * s, l.side - 32 * s, 35 * s}, 19 * s, Blue,
-                 false, true);
+        drawText(g, captureShortcutName(app.captureShortcut),
+                 {16 * s, 197 * s, l.side - 32 * s, 35 * s}, 19 * s, Blue, false, true);
         drawText(g, ui::kEmptyHint, {16 * s, 248 * s, l.side - 32 * s, 30 * s}, 13 * s, Muted,
                  false, true);
     }
@@ -1990,7 +2177,7 @@ void perform(int id, PointF point) {
             app.userZoom = std::clamp(app.layout.zoom * (id == 252 ? 0.8f : 1.25f), 0.02f, 8.f);
         invalidate();
     } else if (id == 254)
-        MessageBoxW(app.main, ui::kHelp, ui::kHelpTitle, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(app.main, helpText().c_str(), ui::kHelpTitle, MB_OK | MB_ICONINFORMATION);
     if ((id >= 200 && id <= 201) || id == 212)
         app.defaults[static_cast<int>(activeTool())] = activeStyle();
 }
@@ -2314,8 +2501,16 @@ void mouseMove(PointF screen) {
     if (app.pressedButton >= 0)
         return;
     if (app.panning) {
-        app.pan = add(app.initialPan, sub(screen, app.dragStart));
-        invalidate();
+        PointF requested = add(app.initialPan, sub(screen, app.dragStart));
+        app.pan = requested;
+        constrainPan();
+        if (app.pan.X != requested.X || app.pan.Y != requested.Y) {
+            // Rebase at the boundary so reversing the mouse responds immediately,
+            // rather than making the user retrace an invisible overscroll distance.
+            app.initialPan = app.pan;
+            app.dragStart = screen;
+        }
+        presentNavigation();
         return;
     }
     if (!app.dragging || !validIndex(app.selected))
@@ -2548,19 +2743,25 @@ void cancelCapture() {
     }
 }
 void finishCapture(RECT r) {
-    if (!app.frozen || r.right - r.left < 2 || r.bottom - r.top < 2)
+    if (!app.frozen)
         return;
-    auto image = std::unique_ptr<Bitmap>(
-        app.frozen->Clone(r.left, r.top, r.right - r.left, r.bottom - r.top, PixelFormat32bppARGB));
-    if (!image || image->GetLastStatus() != Ok) {
-        error(app.overlay, ui::kErrorCrop);
-        cancelCapture();
+    RECT source{0, 0, static_cast<LONG>(app.frozen->GetWidth()),
+                static_cast<LONG>(app.frozen->GetHeight())},
+        frame{};
+    if (!IntersectRect(&frame, &r, &source) || frame.right - frame.left < 2 ||
+        frame.bottom - frame.top < 2)
         return;
-    }
+    // Selection establishes a reversible frame in full-desktop coordinates.
+    // Transfer the frozen bitmap without cropping or taking another screenshot.
+    auto image = std::move(app.frozen);
     cancelCapture();
     captureView.reset();
+    sourceRaster.reset();
+    dragBackground.reset();
     app.image = std::move(image);
-    app.canvas = {};
+    app.canvas = {frame, frame, 0xffffffff};
+    app.zooming = false;
+    KillTimer(app.main, ZoomRefineTimer);
     app.pinnedCanvas = false;
     app.resizingCanvas = false;
     app.canvasHandle = -1;
@@ -2613,7 +2814,7 @@ void takeFrozenCapture() {
     SetFocus(app.overlay);
 }
 void beginCapture() {
-    if (app.overlay || app.capturePending)
+    if (app.overlay || app.capturePending || app.shortcutDialog)
         return;
     commitText();
     if (app.tooltip)
@@ -2845,8 +3046,10 @@ void paint(HWND hwnd, bool overlay, HDC supplied = nullptr) {
     if (supplied)
         GetClipBox(dc, &dirty);
     if (buffer.ensure(dc, w, h) && !IsRectEmpty(&dirty)) {
+        sourceRaster.ensure(app.image.get());
         bool moving = app.dragging && validIndex(app.selected) && !app.edit;
-        Layout layout = moving ? calculateLayout(hwnd) : Layout{};
+        bool navigating = app.image && (app.panning || app.zooming);
+        Layout layout = moving || navigating ? calculateLayout(hwnd) : Layout{};
         bool fast = moving && dragBackground.ensure(dc, w, h);
         if (fast) {
             if (dragRevision != sceneRevision || cachedSelection != app.selected ||
@@ -2868,6 +3071,33 @@ void paint(HWND hwnd, bool overlay, HDC supplied = nullptr) {
                 Rect(dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top));
             app.layout = layout;
             drawAnnotations(g, layout, app.selected, static_cast<int>(app.items.size()));
+            drawSelection(g, layout);
+            drawCanvasHandles(g, layout);
+        } else if (navigating && navigationBackground.ensure(dc, w, h)) {
+            // Toolbars do not change with the camera. Keep their pixels and
+            // redraw only the image, annotations and handles during navigation.
+            if (navigationRevision != sceneRevision || navigationLayout.width != layout.width ||
+                navigationLayout.height != layout.height ||
+                navigationLayout.scale != layout.scale || navigationHover != app.hoverButton ||
+                navigationPressed != app.pressedButton) {
+                Graphics chrome(navigationBackground.dc);
+                chrome.SetSmoothingMode(SmoothingModeAntiAlias);
+                renderEditor(chrome, hwnd, -1, false, true, true);
+                navigationRevision = sceneRevision;
+                navigationLayout = layout;
+                navigationHover = app.hoverButton;
+                navigationPressed = app.pressedButton;
+            }
+            BitBlt(buffer.dc, dirty.left, dirty.top, dirty.right - dirty.left,
+                   dirty.bottom - dirty.top, navigationBackground.dc, dirty.left, dirty.top,
+                   SRCCOPY);
+            Graphics g(buffer.dc);
+            g.SetSmoothingMode(SmoothingModeAntiAlias);
+            g.SetClip(
+                Rect(dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top));
+            app.layout = layout;
+            drawCapture(g, layout, true);
+            drawAnnotations(g, layout, 0, static_cast<int>(app.items.size()));
             drawSelection(g, layout);
             drawCanvasHandles(g, layout);
         } else {
@@ -2963,7 +3193,9 @@ void addTray() {
     n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     n.uCallbackMessage = TrayMessage;
     n.hIcon = app.icon;
-    wcscpy_s(n.szTip, ui::kTrayTip);
+    std::wstring tip =
+        std::wstring(ui::kAppName) + L" | " + captureShortcutName(app.captureShortcut);
+    wcsncpy_s(n.szTip, tip.c_str(), _TRUNCATE);
     app.tray = Shell_NotifyIconW(NIM_ADD, &n) != FALSE;
 }
 void removeTray() {
@@ -2974,10 +3206,267 @@ void removeTray() {
     Shell_NotifyIconW(NIM_DELETE, &n);
     app.tray = false;
 }
+void updateCaptureShortcutLabels() {
+    NOTIFYICONDATAW n{};
+    n.cbSize = sizeof(n);
+    n.hWnd = app.main;
+    n.uID = 1;
+    n.uFlags = NIF_TIP;
+    std::wstring tip =
+        std::wstring(ui::kAppName) + L" | " + captureShortcutName(app.captureShortcut);
+    wcsncpy_s(n.szTip, tip.c_str(), _TRUNCATE);
+    if (app.tray)
+        Shell_NotifyIconW(NIM_MODIFY, &n);
+    report(captureHint().c_str());
+}
+
+struct ShortcutDialogState {
+    CaptureShortcut candidate;
+    bool valid = true;
+    HHOOK recorder = nullptr;
+    std::array<bool, 256> swallowed{};
+    bool leftWin = false, rightWin = false;
+} shortcutDialogState;
+constexpr UINT RecordShortcutMessage = WM_APP + 3;
+
+void setShortcutCandidate(HWND dialog, CaptureShortcut shortcut) {
+    shortcutDialogState.candidate = shortcut;
+    shortcutDialogState.valid = validCaptureShortcut(shortcut);
+    SetDlgItemTextW(dialog, IDC_SHORTCUT_INPUT, captureShortcutName(shortcut).c_str());
+    SetDlgItemTextW(dialog, IDC_SHORTCUT_HINT,
+                    shortcutDialogState.valid ? ui::kShortcutInstructions : ui::kShortcutInvalid);
+    EnableWindow(GetDlgItem(dialog, IDOK), shortcutDialogState.valid);
+}
+
+UINT shortcutModifiers() {
+    return (keyPressed(VK_CONTROL) ? MOD_CONTROL : 0) | (keyPressed(VK_MENU) ? MOD_ALT : 0) |
+           (keyPressed(VK_SHIFT) ? MOD_SHIFT : 0) |
+           ((keyPressed(VK_LWIN) || keyPressed(VK_RWIN)) ? MOD_WIN : 0);
+}
+
+bool shortcutNavigationKey(UINT key, UINT modifiers) {
+    return key == VK_ESCAPE || (!modifiers && (key == VK_TAB || key == VK_RETURN)) ||
+           (key == VK_TAB && modifiers == MOD_SHIFT);
+}
+
+void recordShortcutKey(HWND dialog, UINT key, UINT modifiers) {
+    if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU || key == VK_LWIN || key == VK_RWIN)
+        return;
+    setShortcutCandidate(dialog, {modifiers, key});
+}
+
+// A recorder exists only while this dialog is open. Swallowing the recorded key keeps
+// another application's shortcut from firing and lets us display even an occupied combination.
+LRESULT CALLBACK ShortcutRecorder(int code, WPARAM message, LPARAM data) {
+    if (code == HC_ACTION) {
+        auto* event = reinterpret_cast<KBDLLHOOKSTRUCT*>(data);
+        UINT key = event->vkCode;
+        bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+        if (key < shortcutDialogState.swallowed.size()) {
+            if (!down && shortcutDialogState.swallowed[key]) {
+                shortcutDialogState.swallowed[key] = false;
+                if (key == VK_LWIN)
+                    shortcutDialogState.leftWin = false;
+                if (key == VK_RWIN)
+                    shortcutDialogState.rightWin = false;
+                return 1;
+            }
+            HWND dialog = app.shortcutDialog;
+            if (dialog && GetForegroundWindow() == dialog &&
+                GetFocus() == GetDlgItem(dialog, IDC_SHORTCUT_INPUT)) {
+                if (key == VK_LWIN || key == VK_RWIN) {
+                    (key == VK_LWIN ? shortcutDialogState.leftWin : shortcutDialogState.rightWin) =
+                        down;
+                    shortcutDialogState.swallowed[key] = down;
+                    return 1;
+                }
+                UINT modifiers =
+                    (GetAsyncKeyState(VK_CONTROL) & 0x8000 ? MOD_CONTROL : 0) |
+                    (GetAsyncKeyState(VK_MENU) & 0x8000 ? MOD_ALT : 0) |
+                    (GetAsyncKeyState(VK_SHIFT) & 0x8000 ? MOD_SHIFT : 0) |
+                    (shortcutDialogState.leftWin || shortcutDialogState.rightWin ? MOD_WIN : 0);
+                bool modifier = key == VK_LCONTROL || key == VK_RCONTROL || key == VK_CONTROL ||
+                                key == VK_LSHIFT || key == VK_RSHIFT || key == VK_SHIFT ||
+                                key == VK_LMENU || key == VK_RMENU || key == VK_MENU;
+                if (down && !modifier && !shortcutNavigationKey(key, modifiers)) {
+                    shortcutDialogState.swallowed[key] = true;
+                    PostMessageW(dialog, RecordShortcutMessage, key, modifiers);
+                    return 1;
+                }
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, message, data);
+}
+
+LRESULT CALLBACK ShortcutFieldProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
+    HWND dialog = GetParent(hwnd);
+    if (msg == WM_GETDLGCODE) {
+        UINT modifiers = shortcutModifiers();
+        if (!shortcutNavigationKey(static_cast<UINT>(w), modifiers))
+            return DLGC_WANTALLKEYS;
+    }
+    if (msg == WM_SETFOCUS) {
+        SetWindowTextW(hwnd, ui::kShortcutPrompt);
+        shortcutDialogState.leftWin = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+        shortcutDialogState.rightWin = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+    } else if (msg == WM_KILLFOCUS) {
+        SetWindowTextW(hwnd, captureShortcutName(shortcutDialogState.candidate).c_str());
+    } else if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+        UINT modifiers = shortcutModifiers();
+        if (!shortcutNavigationKey(static_cast<UINT>(w), modifiers)) {
+            recordShortcutKey(dialog, static_cast<UINT>(w), modifiers);
+            return 0;
+        }
+    } else if (msg == WM_CHAR || msg == WM_SYSCHAR || msg == WM_SYSKEYUP) {
+        return 0;
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, ShortcutFieldProc, 1);
+    }
+    return DefSubclassProc(hwnd, msg, w, l);
+}
+
+void centerShortcutDialog(HWND dialog) {
+    RECT frame{};
+    GetWindowRect(dialog, &frame);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &monitor);
+    RECT anchor = monitor.rcWork;
+    if (IsWindowVisible(app.main))
+        GetWindowRect(app.main, &anchor);
+    int width = frame.right - frame.left, height = frame.bottom - frame.top;
+    int x = std::clamp(static_cast<int>((anchor.left + anchor.right - width) / 2),
+                       static_cast<int>(monitor.rcWork.left),
+                       std::max(static_cast<int>(monitor.rcWork.left),
+                                static_cast<int>(monitor.rcWork.right) - width));
+    int y = std::clamp(static_cast<int>((anchor.top + anchor.bottom - height) / 2),
+                       static_cast<int>(monitor.rcWork.top),
+                       std::max(static_cast<int>(monitor.rcWork.top),
+                                static_cast<int>(monitor.rcWork.bottom) - height));
+    SetWindowPos(dialog, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+INT_PTR CALLBACK ShortcutDialogProc(HWND dialog, UINT msg, WPARAM w, LPARAM l) {
+    switch (msg) {
+    case WM_INITDIALOG:
+        app.shortcutDialog = dialog;
+        shortcutDialogState = {};
+        SetWindowTextW(dialog, ui::kCaptureShortcutTitle);
+        SetDlgItemTextW(dialog, IDC_SHORTCUT_LABEL, ui::kCaptureShortcutLabel);
+        SetDlgItemTextW(dialog, IDC_SHORTCUT_RESET, ui::kResetShortcut);
+        SetDlgItemTextW(dialog, IDCANCEL, ui::kCancel);
+        SetDlgItemTextW(dialog, IDOK, ui::kSavePreference);
+        SetWindowSubclass(GetDlgItem(dialog, IDC_SHORTCUT_INPUT), ShortcutFieldProc, 1, 0);
+        setShortcutCandidate(dialog, app.captureShortcut);
+        centerShortcutDialog(dialog);
+        if (!app.test)
+            shortcutDialogState.recorder =
+                SetWindowsHookExW(WH_KEYBOARD_LL, ShortcutRecorder, app.instance, 0);
+        // Start with the saved combination visible. Tab or clicking the field begins recording.
+        if (!app.test)
+            SetFocus(GetDlgItem(dialog, IDOK));
+#ifdef CAPTURA_TEST
+        if (app.shortcutPreview)
+            SetTimer(dialog, 99, 50, nullptr);
+#endif
+        return FALSE;
+#ifdef CAPTURA_TEST
+    case WM_TIMER:
+        if (w == 99) {
+            KillTimer(dialog, 99);
+            ShowWindow(dialog, SW_SHOW);
+            SetForegroundWindow(dialog);
+        }
+        return TRUE;
+#endif
+    case RecordShortcutMessage:
+        recordShortcutKey(dialog, static_cast<UINT>(w), static_cast<UINT>(l));
+        return TRUE;
+    case WM_NOTIFY: {
+        auto* notification = reinterpret_cast<NMHDR*>(l);
+        if (notification->idFrom == IDC_SHORTCUT_RESET &&
+            (notification->code == NM_CLICK || notification->code == NM_RETURN)) {
+            setShortcutCandidate(dialog, {});
+            return TRUE;
+        }
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(w) == IDCANCEL) {
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+        }
+        if (LOWORD(w) == IDOK) {
+            if (!shortcutDialogState.valid)
+                return TRUE;
+            ShortcutSaveResult result = replaceCaptureShortcut(
+                app.captureShortcut, app.hotkey, app.hotkeyId, shortcutDialogState.candidate,
+                [](int id, CaptureShortcut shortcut) {
+#ifdef CAPTURA_TEST
+                    if (app.test)
+                        return true;
+#endif
+                    return RegisterHotKey(app.main, id, shortcut.modifiers | MOD_NOREPEAT,
+                                          shortcut.key) != FALSE;
+                },
+                [](int id) {
+#ifdef CAPTURA_TEST
+                    if (app.test)
+                        return;
+#endif
+                    UnregisterHotKey(app.main, id);
+                },
+                [](CaptureShortcut shortcut) {
+                    return persistCaptureShortcut(app.settingsPath, shortcut);
+                });
+            if (result != ShortcutSaveResult::Saved) {
+                SetDlgItemTextW(dialog, IDC_SHORTCUT_HINT,
+                                result == ShortcutSaveResult::Unavailable
+                                    ? ui::kShortcutUnavailable
+                                    : ui::kShortcutPersistenceError);
+                return TRUE;
+            }
+            updateCaptureShortcutLabels();
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        break;
+    case WM_CLOSE:
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    case WM_DESTROY:
+        if (shortcutDialogState.recorder)
+            UnhookWindowsHookEx(shortcutDialogState.recorder);
+        shortcutDialogState.recorder = nullptr;
+        app.shortcutDialog = nullptr;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void showCaptureShortcutDialog() {
+    if (app.shortcutDialog) {
+        SetForegroundWindow(app.shortcutDialog);
+        return;
+    }
+    if (app.capturePending || app.overlay)
+        return;
+    commitText();
+    if (DialogBoxParamW(app.instance, MAKEINTRESOURCEW(IDD_CAPTURE_SHORTCUT), app.main,
+                        ShortcutDialogProc, 0) == -1)
+        error(app.main, ui::kShortcutDialogError);
+}
+
 void trayMenu() {
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, ui::kNewCapture);
+    std::wstring captureLabel =
+        std::wstring(ui::kNewCapture) + L"\t" + captureShortcutName(app.captureShortcut);
+    AppendMenuW(menu, MF_STRING, 1, captureLabel.c_str());
     AppendMenuW(menu, MF_STRING, 2, ui::kOpenEditor);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 4, ui::kCaptureShortcutMenu);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 3, ui::kExit);
     POINT p;
@@ -2994,6 +3483,8 @@ void trayMenu() {
     }
     if (id == 3)
         DestroyWindow(app.main);
+    if (id == 4)
+        showCaptureShortcutDialog();
     PostMessageW(app.main, WM_NULL, 0, 0);
 }
 void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPressed(VK_SHIFT)) {
@@ -3097,7 +3588,9 @@ void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPre
     }
 }
 void captureHotkey(bool editorActive) {
-    if (editorActive && app.image)
+    if (app.shortcutDialog)
+        return;
+    if (editorActive && app.image && app.captureShortcut == CaptureShortcut{})
         saveImage(true);
     else
         beginCapture();
@@ -3128,6 +3621,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_SIZE:
+        constrainPan();
         positionTextEditor();
         invalidate();
         return 0;
@@ -3217,13 +3711,17 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         if (!app.image || app.edit)
             return 0;
         if (GET_KEYSTATE_WPARAM(w) & MK_CONTROL) {
-            app.userZoom = std::clamp(
-                app.layout.zoom * (GET_WHEEL_DELTA_WPARAM(w) > 0 ? 1.15f : 1 / 1.15f), 0.02f, 8.f);
+            int delta = GET_WHEEL_DELTA_WPARAM(w);
+            if (!delta)
+                return 0;
+            REAL current = app.userZoom > 0 ? app.userZoom : calculateLayout(hwnd).zoom;
+            app.userZoom = std::clamp(current * std::pow(1.15f, delta / 120.f), 0.02f, 8.f);
+            app.zooming = SetTimer(hwnd, ZoomRefineTimer, 140, nullptr) != 0;
         } else if (GET_KEYSTATE_WPARAM(w) & MK_SHIFT)
             app.pan.X += GET_WHEEL_DELTA_WPARAM(w) * 0.5f;
         else
             app.pan.Y += GET_WHEEL_DELTA_WPARAM(w) * 0.5f;
-        invalidate();
+        presentNavigation();
         return 0;
     }
     case WM_KEYDOWN:
@@ -3234,12 +3732,27 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             syncInlineText();
         return 0;
     case WM_HOTKEY:
-        if (w == HotkeyId)
-            captureHotkey(IsWindowVisible(hwnd) && GetForegroundWindow() == hwnd);
+        if (w == static_cast<WPARAM>(app.hotkeyId)) {
+            if (app.shortcutDialog) {
+                if (GetFocus() == GetDlgItem(app.shortcutDialog, IDC_SHORTCUT_INPUT))
+                    recordShortcutKey(app.shortcutDialog, HIWORD(l), LOWORD(l) & ~MOD_NOREPEAT);
+                return 0;
+            }
+            HWND foreground = GetForegroundWindow();
+            captureHotkey(IsWindowVisible(hwnd) &&
+                          (foreground == hwnd || IsChild(hwnd, foreground)));
+        }
         return 0;
     case WM_TIMER:
         if (w == 1 && app.capturePending)
             takeFrozenCapture();
+        if (w == ZoomRefineTimer && app.zooming) {
+            KillTimer(hwnd, ZoomRefineTimer);
+            app.zooming = false;
+            captureView.reset();
+            dragRevision = 0;
+            presentNavigation();
+        }
         return 0;
     case ActivateMessage:
         ShowWindow(hwnd, SW_RESTORE);
@@ -3265,7 +3778,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         commitText();
         if (app.tray) {
             ShowWindow(hwnd, SW_HIDE);
-            report(ui::kCaptureHint);
+            report(captureHint().c_str());
         } else
             DestroyWindow(hwnd);
         return 0;
@@ -3276,16 +3789,20 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             DestroyWindow(overlay);
         }
         if (app.hotkey)
-            UnregisterHotKey(hwnd, HotkeyId);
+            UnregisterHotKey(hwnd, app.hotkeyId);
         if (app.tray)
             removeTray();
         KillTimer(hwnd, 1);
+        KillTimer(hwnd, ZoomRefineTimer);
         if (IsWindow(app.tooltip))
             DestroyWindow(app.tooltip);
         app.tooltip = nullptr;
         editorBuffer.reset();
+        navigationBackground.reset();
+        navigationRevision = 0;
         dragBackground.reset();
         captureView.reset();
+        sourceRaster.reset();
         PostQuitMessage(0);
         return 0;
     }
@@ -3380,6 +3897,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 #ifdef CAPTURA_TEST
+    if (argc == 1 || (argc >= 3 && wcscmp(argv[1], L"--shortcut-preview") == 0)) {
+        app.test = true;
+        app.shortcutPreview = true;
+        wchar_t executable[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        std::wstring executablePath = executable;
+        std::wstring directory =
+            argc >= 3 ? argv[2]
+                      : executablePath.substr(0, executablePath.find_last_of(L"\\")) + L"\\preview";
+        CreateDirectoryW(directory.c_str(), nullptr);
+        app.settingsPath = directory + L"\\preview-shortcut.ini";
+        app.captureShortcut = loadCaptureShortcut(app.settingsPath);
+        LocalFree(argv);
+        createMain();
+        ShowWindow(app.main, SW_HIDE);
+        showCaptureShortcutDialog();
+        DestroyWindow(app.main);
+        DestroyIcon(app.icon);
+        GdiplusShutdown(app.gdiplus);
+        return 0;
+    }
     if (argc >= 3 && wcscmp(argv[1], L"--self-test") == 0) {
         app.test = true;
         std::wstring dir = argv[2];
@@ -3426,14 +3964,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         GdiplusShutdown(app.gdiplus);
         return 1;
     }
+    app.settingsPath = captureSettingsPath();
+    app.captureShortcut = loadCaptureShortcut(app.settingsPath);
+    app.status = captureHint();
     addTray();
     app.hotkey =
-        RegisterHotKey(app.main, HotkeyId, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 'S') != FALSE;
+        RegisterHotKey(app.main, app.hotkeyId, app.captureShortcut.modifiers | MOD_NOREPEAT,
+                       app.captureShortcut.key) != FALSE;
     if (!app.hotkey) {
         app.status = ui::kShortcutBusy;
         if (!app.background)
-            MessageBoxW(app.main, ui::kShortcutBusyDetails, ui::kAppName,
-                        MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(
+                app.main,
+                (captureShortcutName(app.captureShortcut) + ui::kShortcutBusyDetails).c_str(),
+                ui::kAppName, MB_OK | MB_ICONINFORMATION);
     }
     if (!app.background || !app.tray)
         ShowWindow(app.main, show == SW_HIDE ? SW_SHOW : show);

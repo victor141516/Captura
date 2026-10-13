@@ -10,7 +10,7 @@ Captura is a tiny, portable Windows app for screenshots you can explain at a gla
 
 ## From screen to conversation
 
-1. **Capture.** Press **Ctrl + Shift + S** from another app. Drag to select an area, or press **Space** to pick a window.
+1. **Capture.** Press **Ctrl + Shift + S** from another app, or use your chosen capture shortcut. Drag to select an area, or press **Space** to pick a window.
 2. **Make it clear.** Add arrows, text, rectangles, freehand marks, or numbered steps. Every drawing tool has a keyboard shortcut. Drag the handles to get your annotations just right.
 3. **Share.** Finish any text edit with **Enter**, then press **Ctrl + C** and paste the image into your chat, issue, or document. Prefer a file? **Ctrl + S** saves a PNG to **Pictures\Screenshots**.
 
@@ -18,11 +18,11 @@ The editor closes after a successful copy or save. Captura stays in your system 
 
 ## Small app. Clear screenshots.
 
-- **One small executable.** Around 284 KiB. Download `Captura.exe` and run it. No installer, account, or internet connection required. Works on 64-bit Windows 10 and 11.
+- **One small executable.** Around 305 KiB. Download `Captura.exe` and run it. No installer, account, or internet connection required. Works on 64-bit Windows 10 and 11.
 - **Point precisely.** Bend arrows and lines by dragging their center diamond. Use one arrowhead or two. Number a sequence with counters; click and drag to add a pointer.
 - **Write clearly.** Text appears directly on the screenshot, with a rounded background and automatic black or white contrast. Use a shared color across your tools, or choose your own fill.
-- **Get the framing right.** Drag the four canvas corner squares to crop. Change your mind? Stretch back to reveal the original screenshot and annotations during the same session. Go further to add space around the image.
-- **Room for your point.** Draw past an edge and the canvas grows with you. On release, unused automatic space is trimmed. Your chosen manual crop stays under your control.
+- **Get the framing right.** Start with an area or a window, then drag the four corner squares to crop closer or reveal more of the surrounding desktop, captured at the same instant. Cropping stays reversible during the session.
+- **Room for your point.** Draw past an edge and the canvas reveals the captured context. Beyond the full desktop, it adds a matching background. On release, unused automatic space is trimmed. Your chosen frame stays under your control.
 - **Easy to revise.** Move, resize, duplicate, undo, and redo. Copy and save include only the visible frame, with no selection handles.
 
 ## Keyboard shortcuts
@@ -55,6 +55,10 @@ The editor closes after a successful copy or save. Captura stays in your system 
 | Help | **F1** |
 
 Hold **Shift** while drawing to make square rectangles or align a line or arrow at 45-degree angles. Right-click the **Background** swatch to turn a fill on or off. Hover over toolbar icons to see their names and shortcuts.
+
+Scroll and pan to explore your screenshot. Movement stops at its edges, so the image stays within reach even when you change the zoom or resize the editor.
+
+Prefer a different capture shortcut? Right-click Captura's tray icon and choose **Capture shortcut…**. Click the field, press your combination, and choose **Save**. Unavailable shortcuts show an inline error and leave your previous shortcut intact. **Reset to default** restores Ctrl + Shift + S when saved. Your preference is remembered between sessions; Help and the tray menu show the current combination. **Ctrl + Shift + S inside the editor** still opens Save As.
 
 ## Ready when you need it
 
