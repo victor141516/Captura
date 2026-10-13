@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.18.1 — Redaction preview
+
+- Match Lorem substitution to the original word's character count, capitalization, and visible width. Prefer equally long Lorem words and use phrases for longer originals.
+- Preserve estimated glyph height, colors, and exact selection clipping.
+
 ## 1.18.0 — Redaction preview (local experiment)
 
 - Add **Redact (B)** with Gaussian blur, pixelation, Lorem + Gaussian, and Lorem + Pixelate.

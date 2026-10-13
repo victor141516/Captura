@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cwctype>
 #include <unordered_map>
 #include "redaction.h"
 
@@ -68,6 +69,101 @@ struct Replacement {
     ARGB background, color;
     std::wstring text;
 };
+std::wstring loremText(const std::wstring& original, uint32_t& seed) {
+    static constexpr const wchar_t* words[] = {L"a",
+                                               L"et",
+                                               L"ex",
+                                               L"eu",
+                                               L"id",
+                                               L"in",
+                                               L"ut",
+                                               L"sit",
+                                               L"sed",
+                                               L"non",
+                                               L"est",
+                                               L"amet",
+                                               L"elit",
+                                               L"enim",
+                                               L"Lorem",
+                                               L"ipsum",
+                                               L"dolor",
+                                               L"magna",
+                                               L"aliqua",
+                                               L"tempor",
+                                               L"labore",
+                                               L"dolore",
+                                               L"eiusmod",
+                                               L"aliquam",
+                                               L"voluptas",
+                                               L"officiis",
+                                               L"voluptate",
+                                               L"consequat",
+                                               L"adipiscing",
+                                               L"incididunt",
+                                               L"consectetur",
+                                               L"exercitation",
+                                               L"reprehenderit",
+                                               L"necessitatibus"};
+    bool upper = false, lower = false;
+    for (wchar_t c : original) {
+        upper |= std::iswupper(c) != 0;
+        lower |= std::iswlower(c) != 0;
+    }
+    const size_t length = std::clamp(original.size(), size_t(1), size_t(512));
+    std::wstring text;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        text.clear();
+        seed = seed * 1664525u + 1013904223u;
+        unsigned matches = 0;
+        if (length > 1)
+            for (const auto* word : words)
+                if (wcslen(word) == length && _wcsicmp(word, original.c_str()) != 0)
+                    ++matches;
+        if (matches) {
+            unsigned choice = (seed >> 16) % matches;
+            for (const auto* word : words)
+                if (wcslen(word) == length && _wcsicmp(word, original.c_str()) != 0) {
+                    if (choice-- == 0) {
+                        text = word;
+                        break;
+                    }
+                }
+        }
+        while (text.size() < length) {
+            if (!text.empty())
+                text += L' ';
+            size_t remaining = length - text.size();
+            seed = seed * 1664525u + 1013904223u;
+            if (remaining == 1) {
+                // Tiny OCR words still need a different, equally short glyph.
+                constexpr wchar_t initials[] = L"aeilmnstu";
+                text += initials[seed % (std::size(initials) - 1)];
+                break;
+            }
+            unsigned start = seed % std::size(words);
+            for (unsigned offset = 0; offset < std::size(words); ++offset) {
+                const wchar_t* word = words[(start + offset) % std::size(words)];
+                size_t size = wcslen(word);
+                // Avoid a trailing blank: any remainder must fit a space and
+                // another word. Long originals use complete Lorem phrases.
+                if (size <= remaining && remaining - size != 1) {
+                    text += word;
+                    break;
+                }
+            }
+        }
+        for (wchar_t& c : text)
+            c = wchar_t(upper && !lower ? std::towupper(c) : std::towlower(c));
+        if (upper && lower && !original.empty() && std::iswupper(original.front()))
+            text.front() = wchar_t(std::towupper(text.front()));
+        if (_wcsicmp(text.c_str(), original.c_str()) != 0)
+            return text;
+    }
+    text.front() = std::towlower(text.front()) == L'l' ? L'i' : L'l';
+    if (upper && !lower)
+        text.front() = wchar_t(std::towupper(text.front()));
+    return text;
+}
 Replacement replacement(Raster& pixels, const OcrWord& word, const Rect& context, uint32_t& seed) {
     Rect ink = wordRegion(word.bounds, 0), ring = wordRegion(word.bounds, 4);
     Histogram background, foreground;
@@ -95,15 +191,7 @@ Replacement replacement(Raster& pixels, const OcrWord& word, const Rect& context
     ARGB fg = dominant(foreground, colorDistance(bg, 0xff000000) > colorDistance(bg, 0xffffffff)
                                        ? 0xff000000
                                        : 0xffffffff);
-    static constexpr const wchar_t* lorem[] = {
-        L"Lorem",  L"ipsum", L"dolor",  L"sit",     L"amet",   L"consectetur", L"adipiscing",
-        L"elit",   L"sed",   L"do",     L"eiusmod", L"tempor", L"incididunt",  L"ut",
-        L"labore", L"et",    L"dolore", L"magna",   L"aliqua"};
-    seed = seed * 1664525u + 1013904223u;
-    unsigned index = seed % std::size(lorem);
-    if (_wcsicmp(lorem[index], word.text.c_str()) == 0)
-        index = (index + 1) % std::size(lorem);
-    return {word.bounds, bg, fg, lorem[index]};
+    return {word.bounds, bg, fg, loremText(word.text, seed)};
 }
 bool pixelate(Bitmap& image, int block) {
     Raster pixels(image, ImageLockModeRead | ImageLockModeWrite);
@@ -246,7 +334,9 @@ RedactionResult redact(Gdiplus::Bitmap& source, RECT area, RedactionMode mode, f
             if (ink.Width <= 0 || ink.Height <= 0)
                 continue;
             REAL sy = word.bounds.Height / ink.Height;
-            REAL sx = std::min(sy, word.bounds.Width / ink.Width);
+            // Match the original visual span as well as its character count.
+            // Short substitutions must not leave most of a long word blank.
+            REAL sx = word.bounds.Width / ink.Width;
             Matrix transform(sx, 0, 0, sy, word.bounds.X - ink.X * sx, word.bounds.Y - ink.Y * sy);
             glyphs.Transform(&transform);
             SolidBrush foreground(Color(word.color));

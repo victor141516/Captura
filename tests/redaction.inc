@@ -134,6 +134,23 @@ template <typename Check> void testRedaction(const std::wstring& directory, Chec
     } else
         check(false, L"Lorem replacement preserves colored foreground on a light background");
     Bitmap grid(12, 8, PixelFormat32bppARGB);
+    for (uint32_t seed : {17u, 19u, 71u, 917u}) {
+        auto matching = redact(*app.image, {35, 135, 355, 195}, RedactionMode::LoremPixelate, 1,
+                               &recognition->report, seed, 0xffffffff);
+        int left = 320, right = -1;
+        if (matching.bitmap) {
+            auto pixels = redactionPixels(*matching.bitmap);
+            for (int y = 0; y < 60; ++y)
+                for (int x = 0; x < 320; ++x)
+                    if (pixels[y * 320 + x] != ARGB(0xfff0f4f8)) {
+                        left = std::min(left, x);
+                        right = std::max(right, x);
+                    }
+        }
+        const auto& word = recognition->report.lines[1].words[0];
+        check(right >= left && std::abs((right - left + 1) - word.bounds.Width) <= 3,
+              L"Lorem replacement covers the original word width across different random seeds");
+    }
     auto lowContrast = redact(*app.image, {410, 345, 740, 395}, RedactionMode::LoremPixelate, 1,
                               &recognition->report, 37, 0xffffffff);
     bool preservedGray = false;
