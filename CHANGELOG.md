@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.17.0 — OCR preview (local experiment)
+
+- Recognize the complete frozen desktop automatically in the background when a capture opens, including context outside the initial frame.
+- Add **Select text (O)**: highlight recognized words and drag a rectangle to copy its text, preserving line breaks. Clicking a word copies that word.
+- Keep the editor open after copying selected text; Ctrl+C and the Copy icon repeat the selection. Image copy and save still close the editor.
+- Show elapsed and recognition time, process CPU time and average CPU, and sampled process RAM in the preview panel.
+- Cancel obsolete OCR when a new capture opens. Bound native-resolution OCR tiles to limit temporary pixel memory.
+- Use the Windows OCR engine and installed recognition languages, with no bundled model, network service, installer, or external runtime.
+
 ## 1.16.0
 
 - Stop vertical scrolling, Shift + wheel scrolling, and mouse panning at the visible image boundaries.

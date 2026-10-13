@@ -31,6 +31,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `src/main.cpp`: application model, geometry, rendering, input, export, and window lifetime.
 - `src/ui_text.h`: English interface text and help.
 - `src/capture_shortcut.h`: shortcut validation, display, atomic preference storage, and registration replacement.
+- `src/ocr.h`, `src/ocr.cpp`: cancellable background Windows OCR and measurement, with immutable bitmap snapshots and plain text/geometry results.
 - `src/resource.h`: native dialog control identifiers.
 - `src/app.rc`, `src/app.manifest`: version and Windows application resources.
 - `tests/integration.inc`: native integration suite included only in test builds.
@@ -38,6 +39,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `tests/retained_desktop.inc`: selected frame, retained desktop, context expansion, undo/redo, and visible export tests.
 - `tests/navigation.inc`: middle-button and wheel input, navigation caches, quality restoration, clipping, bounded zoom memory, and GDI resource tests. Writes `navigation-performance.txt` with timings for a retained 4K desktop and selected frame.
 - `tests/navigation_bounds.inc`: actual scroll and drag boundary behavior for smaller, larger, cropped, and expanded frames, including reversal, zoom, and window resize.
+- `tests/ocr.inc`: text geometry, Unicode clipboard hooks, cancellation, retained-desktop selection, and real Windows OCR on synthetic screenshots. Writes `ocr-editor.png` and `ocr-benchmark.txt`.
 - `docs/assets`: synthetic screenshots used in the product README.
 - `build.ps1`, `test.ps1`: build and verification entry points.
 
@@ -48,6 +50,18 @@ Format C++ changes with clang-format 19 and the checked-in `.clang-format`. Incl
 Update the version in `app.rc` and `app.manifest`, run the tests, and build the normal executable. Package `Captura.exe`, the product README, and a SHA-256 checksum. Release binaries should remain portable and should not include test code or build outputs.
 
 The app keeps editable content in memory during its session. A saved PNG contains the final visible frame, not an editable project.
+
+## OCR preview
+
+The local `experiment/ocr-text-selection` branch scans the original retained desktop, without annotations, once when `finishCapture` loads an image. The initial frame does not limit recognition. A dedicated MTA worker owns a private bitmap clone, so it never locks the bitmap used by the UI renderer. A newer capture cancels the previous job and replaces pending work; result IDs prevent stale completion messages from updating a newer capture. Shutdown joins the worker before GDI+ is released.
+
+Windows OCR receives native-resolution blocks up to 2600 pixels per side, or the smaller system limit, with 128 pixels of context around seams. Words belong to the tile core containing their center. Row fragments are merged geometrically. This preview uses rectangular word bounds and top-to-bottom / left-to-right ordering; complex columns, rotated text, and scripts requiring other reading orders need further evaluation.
+
+Select text draws overlays only in the current visible frame. Selection uses word centers to avoid copying neighbors when a rectangle barely touches them. OCR overlays are never exported. Text copy uses `CF_UNICODETEXT` and keeps the editor open so the experiment supports repeated selections; normal image exports retain their existing behavior.
+
+Wall time uses QueryPerformanceCounter and includes snapshot preparation and any worker queue delay. Recognition time sums the async API waits. GetProcessTimes measures CPU for the **whole process**, not an isolated OCR thread; divide CPU time by elapsed time and logical processor count for average Task Manager-style CPU percentage. Working set is sampled during recognition, including the pre-job baseline; reported growth is relative to that baseline. These are diagnostic process metrics and can include concurrent rendering or previous recognition. CPU counters have finite granularity and RAM samples can miss short peaks. Screenshots, recognized text, and metrics are not automatically persisted or sent anywhere.
+
+No OCR model is bundled or installed. The engine uses the user's Windows OCR languages and falls back to the first available language. Missing languages or API failures produce an inline unavailable/error state. The standalone unpackaged probe and integration tests work on the local Windows 11 host with `en-US`; this does not establish compatibility with every supported Windows build. See `examples/windows-ocr` for the minimal probe.
 
 Area and window selection transfer the complete frozen desktop bitmap into the editor without cloning or cropping it. The initial selection is stored as the canvas frame and trim baseline in desktop-bitmap coordinates. The renderer clips to that frame, and expansion reveals pixels already in the source. Synthetic fill is used only outside the complete bitmap. PNG and clipboard export translate and clip the source and annotations to the current visible frame.
 

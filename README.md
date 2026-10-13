@@ -4,9 +4,11 @@
 
 Captura is a tiny, portable Windows app for screenshots you can explain at a glance. Grab the part of your screen that matters, point to it with an arrow, add a few words, and paste it straight into a conversation.
 
+> **This branch is an OCR preview.** Open a capture and Windows recognizes its text in the background. Press **O** for **Select text**, then drag over highlighted words to copy them. Click a single word to copy it. The editor stays open for repeated text selections; **Ctrl+C** copies the last selection again. The side panel shows recognition time, CPU use, and RAM. This experiment is local and has not been published as a stable release.
+
 [**Download for Windows x64 →**](https://github.com/victor141516/Captura/releases/latest)
 
-![Captura screenshot editor](docs/assets/editor.png)
+![Captura OCR preview: select highlighted words and copy their text](docs/assets/ocr-preview.png)
 
 ## From screen to conversation
 
@@ -18,7 +20,7 @@ The editor closes after a successful copy or save. Captura stays in your system 
 
 ## Small app. Clear screenshots.
 
-- **One small executable.** Around 305 KiB. Download `Captura.exe` and run it. No installer, account, or internet connection required. Works on 64-bit Windows 10 and 11.
+- **One small executable.** Around 367 KiB in this OCR preview. Download `Captura.exe` and run it. No installer, account, or internet connection required. Targets 64-bit Windows 10 and 11. Text recognition needs an available Windows OCR language; this unpackaged preview has been verified on Windows 11.
 - **Point precisely.** Bend arrows and lines by dragging their center diamond. Use one arrowhead or two. Number a sequence with counters; click and drag to add a pointer.
 - **Write clearly.** Text appears directly on the screenshot, with a rounded background and automatic black or white contrast. Use a shared color across your tools, or choose your own fill.
 - **Get the framing right.** Start with an area or a window, then drag the four corner squares to crop closer or reveal more of the surrounding desktop, captured at the same instant. Cropping stays reversible during the session.
@@ -38,7 +40,8 @@ The editor closes after a successful copy or save. Captura stays in your system 
 | Line | **L** |
 | Numbered counter | **C** |
 | Freehand brush | **P** |
-| Copy image | **Ctrl + C** |
+| Select and copy recognized text, in this preview | **O**, then drag |
+| Copy image, or selected text with Select text active | **Ctrl + C** |
 | Save to Pictures\Screenshots | **Ctrl + S** |
 | Choose a save location, in the editor | **Ctrl + Shift + S**, or **Shift + click Save** |
 | Undo / redo | **Ctrl + Z** / **Ctrl + Y** or **Ctrl + Shift + Z** |

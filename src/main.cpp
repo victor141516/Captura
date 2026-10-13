@@ -22,19 +22,21 @@
 #include "ui_text.h"
 #include "resource.h"
 #include "capture_shortcut.h"
+#include "ocr.h"
 
 using namespace Gdiplus;
 constexpr wchar_t AppClass[] = L"Captura.Native.Editor.1";
 constexpr wchar_t OverlayClass[] = L"Captura.Native.Overlay.1";
 constexpr UINT TrayMessage = WM_APP + 1, ActivateMessage = WM_APP + 2;
+constexpr UINT OcrMessage = WM_APP + 3;
 constexpr UINT_PTR ZoomRefineTimer = 2;
 constexpr REAL Pi = 3.14159265358979f;
 const Color Ink(255, 35, 43, 55), Muted(255, 103, 114, 130), Blue(255, 0, 110, 235);
 const std::array<ARGB, 11> Swatches = {0xffef3e42, 0xfff28c28, 0xffffd23f, 0xff16a765,
                                        0xff087cf0, 0xff8752d6, 0xffec70a5, 0xff202833,
                                        0xffffffff, 0xff758294, 0xff00bcd4};
-enum class Tool { Select, Arrow, Text, Rectangle, Line, Counter, Brush };
-constexpr int ToolCount = 7;
+enum class Tool { Select, Arrow, Text, Rectangle, Line, Counter, Brush, TextSelect };
+constexpr int ToolCount = 8;
 struct Style {
     ARGB color = 0xffef3e42, fill = 0xffef3e42;
     bool filled = false;
@@ -105,8 +107,14 @@ struct AppState {
     bool windowMode = false, selecting = false, capturePending = false, captureRestore = false;
     bool hotkey = false, tray = false, test = false, fillTarget = false;
     bool zooming = false;
+    std::shared_ptr<captura::OcrJob> ocr;
+    bool selectingText = false, hasTextSelection = false;
+    PointF textStart{};
+    RectF textArea{};
+    std::wstring textFeedback;
 #ifdef CAPTURA_TEST
     bool shortcutPreview = false;
+    bool testAutoOcr = false;
 #endif
     PointF dragStart{}, pan{}, initialPan{};
     Item initialItem;
@@ -125,6 +133,29 @@ struct AppState {
     bool trackingMouse = false;
     std::array<bool, 512> tooltipAdded{};
 } app;
+captura::OcrService ocrService;
+
+const captura::OcrReport* ocrReport() {
+    return app.ocr && app.ocr->complete.load(std::memory_order_acquire) ? &app.ocr->report
+                                                                        : nullptr;
+}
+bool ocrReady() {
+    const auto* report = ocrReport();
+    return report && report->state == captura::OcrState::Ready;
+}
+void startOcr() {
+    if (app.ocr)
+        app.ocr->cancelled = true;
+    app.ocr.reset();
+    app.selectingText = app.hasTextSelection = false;
+    app.textFeedback.clear();
+#ifdef CAPTURA_TEST
+    if (app.test && !app.testAutoOcr)
+        return;
+#endif
+    if (app.image)
+        app.ocr = ocrService.start(*app.image, app.main, OcrMessage);
+}
 
 std::wstring captureHint() {
     return captureShortcutName(app.captureShortcut) + L" to capture";
@@ -1131,6 +1162,13 @@ void toolIcon(Graphics& g, Tool tool, RectF r, Color color) {
         PointF digit[] = {{10, 9}, {12, 7}, {12, 17}};
         g.DrawLines(&pen, digit, 3);
         g.DrawLine(&pen, 9.f, 17.f, 15.f, 17.f);
+    } else if (tool == Tool::TextSelect) {
+        PointF left[] = {{7, 3}, {3, 3}, {3, 8}}, right[] = {{17, 21}, {21, 21}, {21, 16}};
+        g.DrawLines(&pen, left, 3);
+        g.DrawLines(&pen, right, 3);
+        g.DrawLine(&pen, 8.f, 7.f, 16.f, 7.f);
+        g.DrawLine(&pen, 12.f, 7.f, 12.f, 17.f);
+        g.DrawLine(&pen, 9.f, 17.f, 15.f, 17.f);
     } else if (tool == Tool::Brush) {
         GraphicsPath handle;
         handle.AddLine(11.f, 11.f, 18.f, 4.f);
@@ -1577,6 +1615,66 @@ void drawCanvasHandles(Graphics& g, const Layout& l) {
     }
     g.Restore(saved);
 }
+void drawOcrOverlay(Graphics& g, const Layout& l) {
+    if (app.tool != Tool::TextSelect || !ocrReady())
+        return;
+    GraphicsState saved = g.Save();
+    g.SetClip(l.canvas);
+    g.TranslateTransform(l.imageX, l.imageY);
+    g.ScaleTransform(l.zoom, l.zoom);
+    RECT frame = canvasBounds();
+    g.SetClip(RectF(float(frame.left), float(frame.top), float(frame.right - frame.left),
+                    float(frame.bottom - frame.top)),
+              CombineModeIntersect);
+    SolidBrush found(Color(45, 0, 110, 235)), picked(Color(105, 0, 110, 235));
+    Pen edge(Color(160, 0, 110, 235), 1 / l.zoom);
+    for (const auto& line : ocrReport()->lines)
+        for (const auto& word : line.words) {
+            bool selected = app.hasTextSelection && captura::wordInside(word, app.textArea);
+            g.FillRectangle(selected ? &picked : &found, word.bounds);
+            g.DrawRectangle(&edge, word.bounds);
+        }
+    if (app.hasTextSelection) {
+        SolidBrush area(Color(20, 0, 110, 235));
+        Pen border(Blue, 1.5f / l.zoom);
+        border.SetDashStyle(DashStyleDash);
+        g.FillRectangle(&area, app.textArea);
+        g.DrawRectangle(&border, app.textArea);
+    }
+    g.Restore(saved);
+}
+void drawOcrPanel(Graphics& g, REAL x, REAL y, REAL width, REAL scale) {
+    auto paragraph = [&](const std::wstring& text, RectF rect, REAL size, Color color) {
+        Font font(L"Segoe UI", size, FontStyleRegular, UnitPixel);
+        SolidBrush ink(color);
+        StringFormat format;
+        format.SetTrimming(StringTrimmingEllipsisWord);
+        g.DrawString(text.c_str(), -1, &font, rect, &format, &ink);
+    };
+    drawText(g, L"Select text · preview", {x, y, width, 26 * scale}, 14 * scale, Ink, true);
+    y += 38 * scale;
+    const auto* report = ocrReport();
+    const wchar_t* status = !app.image ? L"Capture an image to begin."
+                            : !report  ? L"Recognizing text…"
+                            : report->state == captura::OcrState::Ready ? L"Text is ready"
+                            : report->state == captura::OcrState::Empty ? L"No text found"
+                            : report->error.empty()                     ? L"Recognition cancelled"
+                                                                        : report->error.c_str();
+    paragraph(status, {x, y, width, 36 * scale}, 12 * scale, Blue);
+    y += 40 * scale;
+    paragraph(L"Drag over highlighted words to copy them. The editor stays open.",
+              {x, y, width, 56 * scale}, 12 * scale, Muted);
+    y += 66 * scale;
+    if (!app.textFeedback.empty()) {
+        paragraph(app.textFeedback, {x, y, width, 36 * scale}, 12 * scale, Blue);
+        y += 46 * scale;
+    }
+    if (report) {
+        paragraph(captura::metricsText(*report), {x, y, width, 150 * scale}, 11 * scale, Ink);
+        paragraph(L"CPU and RAM measure the whole process. CPU % uses all logical processors.",
+                  {x, y + 160 * scale, width, 64 * scale}, 10 * scale, Muted);
+    }
+}
 void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true,
                   bool cachedCapture = false, bool chromeOnly = false) {
     app.layout = calculateLayout(hwnd);
@@ -1621,6 +1719,7 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
             if (selection) {
                 drawSelection(g, l);
                 drawCanvasHandles(g, l);
+                drawOcrOverlay(g, l);
             }
         }
     } else {
@@ -1634,87 +1733,92 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
     REAL px = l.side + 16 * s, pw = l.width - px - 16 * s, y = 72 * s;
     Tool t = activeTool();
     Style st = activeStyle();
-    if (t == Tool::Arrow) {
-        for (int i = 0; i < 2; i++) {
-            RectF r(px + i * (pw / 2), y, pw / 2 - 6 * s, 32 * s);
-            button(g, r, 200 + i, L"", st.arrow == i);
-            Style tiny = st;
-            tiny.size = 2 * s;
-            tiny.color = Ink.GetValue();
-            tiny.arrow = i;
-            drawArrow(g, {r.X + 12 * s, r.Y + 21 * s}, {r.GetRight() - 12 * s, r.Y + 11 * s}, tiny);
+    if (app.tool == Tool::TextSelect) {
+        drawOcrPanel(g, px, y, pw, s);
+    } else {
+        if (t == Tool::Arrow) {
+            for (int i = 0; i < 2; i++) {
+                RectF r(px + i * (pw / 2), y, pw / 2 - 6 * s, 32 * s);
+                button(g, r, 200 + i, L"", st.arrow == i);
+                Style tiny = st;
+                tiny.size = 2 * s;
+                tiny.color = Ink.GetValue();
+                tiny.arrow = i;
+                drawArrow(g, {r.X + 12 * s, r.Y + 21 * s}, {r.GetRight() - 12 * s, r.Y + 11 * s},
+                          tiny);
+            }
+            y += 46 * s;
         }
-        y += 46 * s;
-    }
-    drawText(g, ui::kColor, {px, y, pw - 56 * s, 28 * s}, 12 * s);
-    RectF fg(px + pw - 48 * s, y, 48 * s, 28 * s);
-    button(g, fg, 210, L"", !app.fillTarget);
-    SolidBrush color(Color(st.color));
-    g.FillRectangle(&color, fg.X + 6 * s, fg.Y + 5 * s, fg.Width - 12 * s, fg.Height - 10 * s);
-    y += 40 * s;
-    bool fillable = t == Tool::Text || t == Tool::Rectangle || t == Tool::Counter;
-    if (fillable) {
-        drawText(g, ui::kBackground, {px, y, pw - 56 * s, 28 * s}, 12 * s);
-        RectF bg(px + pw - 48 * s, y, 48 * s, 28 * s);
-        button(g, bg, 211, L"", app.fillTarget);
-        RectF chip(bg.X + 6 * s, bg.Y + 5 * s, bg.Width - 12 * s, bg.Height - 10 * s);
-        if (st.filled) {
-            SolidBrush cb(Color(st.fill));
-            g.FillRectangle(&cb, chip);
-        } else
-            checker(g, chip);
+        drawText(g, ui::kColor, {px, y, pw - 56 * s, 28 * s}, 12 * s);
+        RectF fg(px + pw - 48 * s, y, 48 * s, 28 * s);
+        button(g, fg, 210, L"", !app.fillTarget);
+        SolidBrush color(Color(st.color));
+        g.FillRectangle(&color, fg.X + 6 * s, fg.Y + 5 * s, fg.Width - 12 * s, fg.Height - 10 * s);
         y += 40 * s;
-    }
-    ARGB paletteColor = (app.fillTarget || (t == Tool::Text && st.filled)) ? st.fill : st.color;
-    REAL tile = (pw - 5 * 6 * s) / 6;
-    for (int i = 0; i < 12; i++) {
-        RectF r(px + (i % 6) * (tile + 6 * s), y + (i / 6) * 34 * s, tile, 28 * s);
-        int id = i < 11 ? 300 + i : 213;
-        button(g, r, id, L"", i < 11 && paletteColor == Swatches[i]);
-        RectF inside(r.X + 3 * s, r.Y + 3 * s, r.Width - 6 * s, r.Height - 6 * s);
-        if (i < 11) {
-            SolidBrush c{Color(Swatches[i])};
-            g.FillRectangle(&c, inside);
-        } else {
-            LinearGradientBrush rainbow(inside, Color(255, 255, 0, 0), Color(255, 130, 0, 255),
-                                        LinearGradientModeHorizontal);
-            Color colors[] = {Color(255, 255, 0, 0),   Color(255, 255, 160, 0),
-                              Color(255, 255, 240, 0), Color(255, 0, 190, 80),
-                              Color(255, 0, 180, 240), Color(255, 40, 70, 240),
-                              Color(255, 180, 0, 220)};
-            REAL positions[] = {0, 1 / 6.f, 2 / 6.f, 3 / 6.f, 4 / 6.f, 5 / 6.f, 1};
-            rainbow.SetInterpolationColors(colors, positions, 7);
-            g.FillRectangle(&rainbow, inside);
+        bool fillable = t == Tool::Text || t == Tool::Rectangle || t == Tool::Counter;
+        if (fillable) {
+            drawText(g, ui::kBackground, {px, y, pw - 56 * s, 28 * s}, 12 * s);
+            RectF bg(px + pw - 48 * s, y, 48 * s, 28 * s);
+            button(g, bg, 211, L"", app.fillTarget);
+            RectF chip(bg.X + 6 * s, bg.Y + 5 * s, bg.Width - 12 * s, bg.Height - 10 * s);
+            if (st.filled) {
+                SolidBrush cb(Color(st.fill));
+                g.FillRectangle(&cb, chip);
+            } else
+                checker(g, chip);
+            y += 40 * s;
         }
-        if (app.hoverButton == id) {
-            SolidBrush feedback(Color(app.pressedButton == id ? 75 : 35, 255, 255, 255));
-            g.FillRectangle(&feedback, inside);
+        ARGB paletteColor = (app.fillTarget || (t == Tool::Text && st.filled)) ? st.fill : st.color;
+        REAL tile = (pw - 5 * 6 * s) / 6;
+        for (int i = 0; i < 12; i++) {
+            RectF r(px + (i % 6) * (tile + 6 * s), y + (i / 6) * 34 * s, tile, 28 * s);
+            int id = i < 11 ? 300 + i : 213;
+            button(g, r, id, L"", i < 11 && paletteColor == Swatches[i]);
+            RectF inside(r.X + 3 * s, r.Y + 3 * s, r.Width - 6 * s, r.Height - 6 * s);
+            if (i < 11) {
+                SolidBrush c{Color(Swatches[i])};
+                g.FillRectangle(&c, inside);
+            } else {
+                LinearGradientBrush rainbow(inside, Color(255, 255, 0, 0), Color(255, 130, 0, 255),
+                                            LinearGradientModeHorizontal);
+                Color colors[] = {Color(255, 255, 0, 0),   Color(255, 255, 160, 0),
+                                  Color(255, 255, 240, 0), Color(255, 0, 190, 80),
+                                  Color(255, 0, 180, 240), Color(255, 40, 70, 240),
+                                  Color(255, 180, 0, 220)};
+                REAL positions[] = {0, 1 / 6.f, 2 / 6.f, 3 / 6.f, 4 / 6.f, 5 / 6.f, 1};
+                rainbow.SetInterpolationColors(colors, positions, 7);
+                g.FillRectangle(&rainbow, inside);
+            }
+            if (app.hoverButton == id) {
+                SolidBrush feedback(Color(app.pressedButton == id ? 75 : 35, 255, 255, 255));
+                g.FillRectangle(&feedback, inside);
+            }
         }
-    }
-    y += 78 * s;
-    RectF slider(px + 6 * s, y, pw - 12 * s, 28 * s);
-    app.buttons.push_back({slider, 222});
-    REAL minSize = t == Tool::Text ? 8.f : (t == Tool::Counter ? 12.f : 1.f),
-         maxSize = t == Tool::Text ? 96.f : (t == Tool::Counter ? 64.f : 24.f);
-    Pen track(Color(255, 219, 227, 239), 4 * s);
-    g.DrawLine(&track, slider.X, slider.Y + 14 * s, slider.GetRight(), slider.Y + 14 * s);
-    REAL k = std::clamp((st.size - minSize) / (maxSize - minSize), 0.f, 1.f);
-    Pen activeTrack(Blue, 4 * s);
-    g.DrawLine(&activeTrack, slider.X, slider.Y + 14 * s, slider.X + k * slider.Width,
-               slider.Y + 14 * s);
-    SolidBrush knob(app.sizing ? Color(255, 0, 77, 176)
-                               : (app.hoverButton == 222 ? Color(255, 0, 94, 211) : Blue));
-    REAL radius = app.sizing || app.hoverButton == 222 ? 7 * s : 6 * s;
-    g.FillEllipse(&knob, slider.X + k * slider.Width - radius, slider.Y + 14 * s - radius,
-                  2 * radius, 2 * radius);
-    y += 43 * s;
-    if (t == Tool::Counter && validIndex(app.selected)) {
-        drawText(g, ui::kNumber, {px, y, pw - 72 * s, 28 * s}, 12 * s);
-        button(g, {px + pw - 68 * s, y, 30 * s, 28 * s}, 230, L"−");
-        button(g, {px + pw - 30 * s, y, 30 * s, 28 * s}, 231, L"+");
-        y += 37 * s;
-        button(g, {px, y, pw, 29 * s}, 232, ui::kRemovePointer);
-        y += 40 * s;
+        y += 78 * s;
+        RectF slider(px + 6 * s, y, pw - 12 * s, 28 * s);
+        app.buttons.push_back({slider, 222});
+        REAL minSize = t == Tool::Text ? 8.f : (t == Tool::Counter ? 12.f : 1.f),
+             maxSize = t == Tool::Text ? 96.f : (t == Tool::Counter ? 64.f : 24.f);
+        Pen track(Color(255, 219, 227, 239), 4 * s);
+        g.DrawLine(&track, slider.X, slider.Y + 14 * s, slider.GetRight(), slider.Y + 14 * s);
+        REAL k = std::clamp((st.size - minSize) / (maxSize - minSize), 0.f, 1.f);
+        Pen activeTrack(Blue, 4 * s);
+        g.DrawLine(&activeTrack, slider.X, slider.Y + 14 * s, slider.X + k * slider.Width,
+                   slider.Y + 14 * s);
+        SolidBrush knob(app.sizing ? Color(255, 0, 77, 176)
+                                   : (app.hoverButton == 222 ? Color(255, 0, 94, 211) : Blue));
+        REAL radius = app.sizing || app.hoverButton == 222 ? 7 * s : 6 * s;
+        g.FillEllipse(&knob, slider.X + k * slider.Width - radius, slider.Y + 14 * s - radius,
+                      2 * radius, 2 * radius);
+        y += 43 * s;
+        if (t == Tool::Counter && validIndex(app.selected)) {
+            drawText(g, ui::kNumber, {px, y, pw - 72 * s, 28 * s}, 12 * s);
+            button(g, {px + pw - 68 * s, y, 30 * s, 28 * s}, 230, L"−");
+            button(g, {px + pw - 30 * s, y, 30 * s, 28 * s}, 231, L"+");
+            y += 37 * s;
+            button(g, {px, y, pw, 29 * s}, 232, ui::kRemovePointer);
+            y += 40 * s;
+        }
     }
     g.FillRectangle(&white, 0.f, l.height - 30 * s, l.width, 30 * s);
     g.DrawLine(&separator, 0.f, l.height - 30 * s, l.width, l.height - 30 * s);
@@ -1766,6 +1870,7 @@ std::wstring testPicturesDirectory, testSaveDialogPath, testSavedPath;
 int testSaveDialogs = 0;
 int testExportCompletions = 0;
 bool testClipboardSuccess = true;
+std::wstring testCopiedText;
 #endif
 void exportComplete() {
 #ifdef CAPTURA_TEST
@@ -1959,7 +2064,55 @@ HGLOBAL makeDib(Bitmap& bitmap) {
     GlobalUnlock(memory);
     return memory;
 }
+void copySelectedText() {
+    if (!ocrReady()) {
+        app.textFeedback = L"Text is not ready yet.";
+        invalidate();
+        return;
+    }
+    RECT bounds = canvasBounds();
+    RectF frame(float(bounds.left), float(bounds.top), float(bounds.right - bounds.left),
+                float(bounds.bottom - bounds.top)),
+        visible;
+    RectF::Intersect(visible, app.textArea, frame);
+    std::wstring text = app.hasTextSelection ? captura::selectedText(*ocrReport(), visible) : L"";
+    if (text.empty()) {
+        app.textFeedback = L"No text in the selected area.";
+        invalidate();
+        return;
+    }
+    bool copied = false;
+#ifdef CAPTURA_TEST
+    if (app.test) {
+        copied = testClipboardSuccess;
+        if (copied)
+            testCopiedText = text;
+    } else
+#endif
+    {
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+        if (memory) {
+            void* bytes = GlobalLock(memory);
+            if (bytes) {
+                memcpy(bytes, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+                GlobalUnlock(memory);
+                if (OpenClipboard(app.main)) {
+                    copied = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory);
+                    CloseClipboard();
+                }
+            }
+            if (!copied)
+                GlobalFree(memory);
+        }
+    }
+    app.textFeedback = copied ? L"Text copied to clipboard." : L"Could not copy text. Try Ctrl+C.";
+    invalidate();
+}
 void copyImage() {
+    if (app.tool == Tool::TextSelect) {
+        copySelectedText();
+        return;
+    }
     commitText();
     auto bitmap = flattened();
     if (!bitmap)
@@ -2083,6 +2236,9 @@ void chooseColor() {
 }
 void setTool(Tool tool) {
     commitText();
+    app.selectingText = false;
+    if (GetCapture() == app.main && !app.dragging && !app.panning && !app.resizingCanvas)
+        ReleaseCapture();
     app.tool = tool;
     app.selected = -1;
     app.fillTarget = tool == Tool::Text && app.defaults[static_cast<int>(tool)].filled;
@@ -2330,6 +2486,7 @@ void mouseDown(PointF screen) {
     setHoverButton(-1);
     int canvasCorner = canvasHandleAt(screen);
     if (canvasCorner >= 0 && !keyPressed(VK_SPACE)) {
+        app.hasTextSelection = false;
         checkpoint();
         app.resizeStart = canvasBounds();
         app.gestureCanvas = app.resizeStart;
@@ -2365,6 +2522,18 @@ void mouseDown(PointF screen) {
         return;
     }
     PointF p = toImage(screen);
+    if (app.tool == Tool::TextSelect) {
+        app.selected = -1;
+        if (ocrReady()) {
+            app.textStart = p;
+            app.textArea = {p.X, p.Y, 0, 0};
+            app.selectingText = app.hasTextSelection = true;
+            app.textFeedback.clear();
+            SetCapture(app.main);
+        }
+        invalidate();
+        return;
+    }
     app.dragHandle = -1;
     if (validIndex(app.selected)) {
         auto points = handles(app.items[app.selected]);
@@ -2481,6 +2650,13 @@ void invalidateMovement(RECT oldArea, REAL previousSize, const Item& after) {
         UpdateWindow(app.main);
 }
 void mouseMove(PointF screen) {
+    if (app.selectingText) {
+        app.textArea = normalized(app.textStart, toImage(screen));
+        invalidate();
+        if (!app.test && IsWindowVisible(app.main))
+            UpdateWindow(app.main);
+        return;
+    }
     if (!app.trackingMouse) {
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, app.main, 0};
         TrackMouseEvent(&track);
@@ -2602,6 +2778,7 @@ void mouseMove(PointF screen) {
         invalidateMovement(oldArea, previousSize, item);
 }
 void mouseUp() {
+    app.selectingText = false;
     if (app.resizingCanvas) {
         RECT frame = canvasBounds();
         for (Item& item : app.items) {
@@ -2637,6 +2814,18 @@ void mouseUp() {
     invalidate();
 }
 void releasePointer(PointF screen) {
+    if (app.selectingText) {
+        mouseMove(screen);
+        if (app.textArea.Width < 2 && app.textArea.Height < 2 && ocrReady()) {
+            for (const auto& line : ocrReport()->lines)
+                for (const auto& word : line.words)
+                    if (word.bounds.Contains(app.textStart))
+                        app.textArea = word.bounds;
+        }
+        mouseUp();
+        copySelectedText();
+        return;
+    }
     if (app.pressedButton >= 0) {
         int id = app.pressedButton;
         bool activate = id != 222 && buttonAt(screen, true) == id;
@@ -2775,6 +2964,7 @@ void finishCapture(RECT r) {
     app.pan = {0, 0};
     app.tool = Tool::Arrow;
     app.status = ui::kCaptureReady;
+    startOcr();
     if (!app.test) {
         ShowWindow(app.main, SW_RESTORE);
         SetForegroundWindow(app.main);
@@ -3100,6 +3290,7 @@ void paint(HWND hwnd, bool overlay, HDC supplied = nullptr) {
             drawAnnotations(g, layout, 0, static_cast<int>(app.items.size()));
             drawSelection(g, layout);
             drawCanvasHandles(g, layout);
+            drawOcrOverlay(g, layout);
         } else {
             Graphics g(buffer.dc);
             g.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -3512,6 +3703,12 @@ void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPre
         return;
     }
     if (key == VK_ESCAPE) {
+        if (app.selectingText || (app.tool == Tool::TextSelect && app.hasTextSelection)) {
+            app.hasTextSelection = false;
+            mouseUp();
+            app.textFeedback.clear();
+            return;
+        }
         if (app.resizingCanvas) {
             mouseUp();
             undo(false);
@@ -3584,6 +3781,9 @@ void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPre
         break;
     case 'P':
         setTool(Tool::Brush);
+        break;
+    case 'O':
+        setTool(Tool::TextSelect);
         break;
     }
 }
@@ -3660,6 +3860,8 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_MBUTTONDOWN:
+        if (app.selectingText)
+            return 0;
         if (contains(app.layout.canvas,
                      {static_cast<REAL>(GET_X_LPARAM(l)), static_cast<REAL>(GET_Y_LPARAM(l))})) {
             app.panning = true;
@@ -3673,6 +3875,10 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         mouseUp();
         return 0;
     case WM_CAPTURECHANGED:
+        if (app.selectingText) {
+            app.selectingText = app.hasTextSelection = false;
+            invalidate();
+        }
         if (app.dragging || app.panning || app.sizing || app.pressedButton >= 0 ||
             app.resizingCanvas) {
             if (app.resizingCanvas) {
@@ -3703,11 +3909,18 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     : canvasHandleAt({static_cast<REAL>(cursor.x), static_cast<REAL>(cursor.y)});
             SetCursor(LoadCursorW(
                 nullptr, handle >= 0 ? (handle == 0 || handle == 2 ? IDC_SIZENWSE : IDC_SIZENESW)
-                                     : IDC_ARROW));
+                                     : (app.tool == Tool::TextSelect &&
+                                                onImage({float(cursor.x), float(cursor.y)})
+                                            ? IDC_CROSS
+                                            : IDC_ARROW)));
             return TRUE;
         }
         break;
     case WM_MOUSEWHEEL: {
+        if (app.selectingText) {
+            app.hasTextSelection = false;
+            mouseUp();
+        }
         if (!app.image || app.edit)
             return 0;
         if (GET_KEYSTATE_WPARAM(w) & MK_CONTROL) {
@@ -3753,6 +3966,10 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             dragRevision = 0;
             presentNavigation();
         }
+        return 0;
+    case OcrMessage:
+        if (app.ocr && app.ocr->id == static_cast<uint64_t>(w) && ocrReport())
+            invalidate();
         return 0;
     case ActivateMessage:
         ShowWindow(hwnd, SW_RESTORE);
@@ -3803,6 +4020,8 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         dragBackground.reset();
         captureView.reset();
         sourceRaster.reset();
+        ocrService.shutdown();
+        app.ocr.reset();
         PostQuitMessage(0);
         return 0;
     }

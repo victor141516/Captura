@@ -3,9 +3,9 @@
 // The interface is English regardless of the system language.
 namespace ui {
 inline constexpr wchar_t kAppName[] = L"Captura";
-inline constexpr const wchar_t* kTooltips[] = {L"Select (V)",    L"Arrow (A)", L"Text (T)",
-                                               L"Rectangle (R)", L"Line (L)",  L"Counter (C)",
-                                               L"Brush (P)"};
+inline constexpr const wchar_t* kTooltips[] = {L"Select (V)",    L"Arrow (A)",      L"Text (T)",
+                                               L"Rectangle (R)", L"Line (L)",       L"Counter (C)",
+                                               L"Brush (P)",     L"Select text (O)"};
 inline constexpr wchar_t kUndo[] = L"Undo (Ctrl+Z)";
 inline constexpr wchar_t kRedo[] = L"Redo (Ctrl+Y)";
 inline constexpr wchar_t kCopy[] = L"Copy (Ctrl+C)";
@@ -79,7 +79,13 @@ inline constexpr wchar_t kHelp[] =
     L"Esc: cancel capture or selection\n\n"
     L"TOOLS\n"
     L"V Select   A Arrow   T Text\n"
-    L"R Rectangle   L Line   C Counter   P Brush\n\n"
+    L"R Rectangle   L Line   C Counter   P Brush   O Select text\n\n"
+    L"TEXT SELECTION (PREVIEW)\n"
+    L"Windows OCR starts in the background when a capture opens.\n"
+    L"Select text highlights recognized words. Drag an area to copy its text.\n"
+    L"Ctrl + C copies the last text selection. The editor stays open.\n"
+    L"CPU and RAM metrics cover the whole process, including other editor work.\n"
+    L"Average CPU is normalized across all logical processors.\n\n"
     L"SHARE\n"
     L"Ctrl + C: copy image\n"
     L"Ctrl + S: save PNG to Pictures\\Screenshots\n"

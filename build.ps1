@@ -34,7 +34,8 @@ try {
         (Join-Path $compilerTools.FullName 'include'),
         (Join-Path $windowsKits "Include\$($sdk.Name)\ucrt"),
         (Join-Path $windowsKits "Include\$($sdk.Name)\shared"),
-        (Join-Path $windowsKits "Include\$($sdk.Name)\um")
+        (Join-Path $windowsKits "Include\$($sdk.Name)\um"),
+        (Join-Path $windowsKits "Include\$($sdk.Name)\cppwinrt")
     ) -join ';'
     $env:LIB = @(
         (Join-Path $compilerTools.FullName 'lib\x64'),
@@ -54,12 +55,12 @@ try {
     )
     if ($WithTests) { $options += '/DCAPTURA_TEST' }
     $options += @(
-        'main.cpp', "/Fo$buildDirectory\main.obj", "/Fe$output\Captura.exe",
+        'main.cpp', 'ocr.cpp', "/Fo$buildDirectory\", "/Fe$output\Captura.exe",
         '/link', "$buildDirectory\app.res", '/SUBSYSTEM:WINDOWS', '/MACHINE:X64',
         '/LTCG', '/OPT:REF', '/OPT:ICF', '/INCREMENTAL:NO', '/DYNAMICBASE',
         '/NXCOMPAT', '/HIGHENTROPYVA', '/MANIFEST:NO',
         'user32.lib', 'gdi32.lib', 'gdiplus.lib', 'comdlg32.lib', 'shell32.lib',
-        'dwmapi.lib', 'ole32.lib', 'comctl32.lib', 'uuid.lib'
+        'dwmapi.lib', 'ole32.lib', 'comctl32.lib', 'uuid.lib', 'windowsapp.lib'
     )
     & $compiler @options
     if ($LASTEXITCODE) { throw 'Compilation failed.' }
