@@ -1,0 +1,10 @@
+/build/
+/dist/
+/test-results/
+*.exe
+*.obj
+*.res
+*.pdb
+*.ilk
+.vs/
+Thumbs.db
