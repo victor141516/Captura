@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cwctype>
+#include <emmintrin.h>
 #include <unordered_map>
 #include "redaction.h"
 
@@ -218,21 +219,69 @@ bool pixelate(Bitmap& image, int block) {
         }
     return true;
 }
-bool applyEffect(Bitmap& patch, bool gaussian, float strength) {
-    if (!gaussian)
-        return pixelate(patch, std::max(1, int(std::round(strength))));
-    Blur blur;
-    BlurParams parameters{std::clamp(strength, 0.5f, 255.f), FALSE};
-    RECT roi{0, 0, LONG(patch.GetWidth()), LONG(patch.GetHeight())};
-    if (blur.SetParameters(&parameters) != Ok || patch.ApplyEffect(&blur, &roi) != Ok)
-        return false;
+bool gaussianBlur(Bitmap& patch, float strength) {
     Raster pixels(patch, ImageLockModeRead | ImageLockModeWrite);
     if (!pixels.locked)
         return false;
-    // Opaque replacement prevents the original from showing through blur edges.
-    for (unsigned y = 0; y < patch.GetHeight(); ++y)
-        for (unsigned x = 0; x < patch.GetWidth(); ++x)
-            pixels.at(x, y) |= 0xff000000;
+    const int width = int(patch.GetWidth()), height = int(patch.GetHeight());
+    // One continuous sigma mapping for both axes and all preview resolutions.
+    // GDI+ Blur is directional at small radii on some Windows builds.
+    const float sigma = std::clamp(strength, 0.01f, 255.f) * 0.45f;
+    const int radius = std::max(1, int(std::ceil(3.f * sigma)));
+    std::vector<float> weights(size_t(radius) + 1);
+    double total = 0;
+    for (int k = 0; k <= radius; ++k) {
+        weights[k] = float(std::exp(-double(k * k) / (2.0 * sigma * sigma)));
+        total += weights[k] * (k ? 2 : 1);
+    }
+    for (float& weight : weights)
+        weight = float(weight / total);
+    // SSE2 is part of the x64 baseline. Keep fractional channel values between
+    // passes and round only once, avoiding directional quantization artifacts.
+    std::vector<__m128> horizontal(size_t(width) * height);
+    std::vector<__m128> row(size_t(width) + 2 * radius), sum(width);
+    const __m128i zero = _mm_setzero_si128();
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            __m128i packed = _mm_cvtsi32_si128(int(pixels.at(x, y)));
+            row[size_t(x) + radius] =
+                _mm_cvtepi32_ps(_mm_unpacklo_epi16(_mm_unpacklo_epi8(packed, zero), zero));
+        }
+        for (int k = 0; k < radius; ++k) {
+            row[k] = row[radius];
+            row[size_t(width) + radius + k] = row[size_t(width) + radius - 1];
+        }
+        __m128* output = horizontal.data() + size_t(y) * width;
+        const __m128 center = _mm_set1_ps(weights[0]);
+        for (int x = 0; x < width; ++x)
+            output[x] = _mm_mul_ps(row[size_t(x) + radius], center);
+        for (int k = 1; k <= radius; ++k) {
+            const __m128 weight = _mm_set1_ps(weights[k]);
+            for (int x = 0; x < width; ++x)
+                output[x] = _mm_add_ps(output[x],
+                                       _mm_mul_ps(weight, _mm_add_ps(row[size_t(x) + radius - k],
+                                                                     row[size_t(x) + radius + k])));
+        }
+    }
+    for (int y = 0; y < height; ++y) {
+        const __m128* center = horizontal.data() + size_t(y) * width;
+        const __m128 weight0 = _mm_set1_ps(weights[0]);
+        for (int x = 0; x < width; ++x)
+            sum[x] = _mm_mul_ps(center[x], weight0);
+        for (int k = 1; k <= radius; ++k) {
+            const __m128* before = horizontal.data() + size_t(std::max(0, y - k)) * width;
+            const __m128* after = horizontal.data() + size_t(std::min(height - 1, y + k)) * width;
+            const __m128 weight = _mm_set1_ps(weights[k]);
+            for (int x = 0; x < width; ++x)
+                sum[x] = _mm_add_ps(sum[x], _mm_mul_ps(weight, _mm_add_ps(before[x], after[x])));
+        }
+        for (int x = 0; x < width; ++x) {
+            __m128i channels = _mm_cvttps_epi32(_mm_add_ps(sum[x], _mm_set1_ps(0.5f)));
+            __m128i packed = _mm_packus_epi16(_mm_packs_epi32(channels, zero), zero);
+            // Opaque replacement prevents the original from showing through edges.
+            pixels.at(x, y) = ARGB(_mm_cvtsi128_si32(packed)) | 0xff000000;
+        }
+    }
     return true;
 }
 } // namespace
@@ -345,7 +394,8 @@ RedactionResult redact(Gdiplus::Bitmap& source, RECT area, RedactionMode mode, f
             underlay(g);
     }
     bool gaussian = mode == RedactionMode::Gaussian || mode == RedactionMode::LoremGaussian;
-    if (!applyEffect(*patch, gaussian, strength * scale))
+    if (!(gaussian ? gaussianBlur(*patch, strength * scale)
+                   : pixelate(*patch, std::max(1, int(std::round(strength * scale))))))
         return {};
     return {std::move(patch), words};
 }

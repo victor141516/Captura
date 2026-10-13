@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.3 — Redaction preview
+
+- Fix low-strength Gaussian blur appearing horizontal and abruptly changing near the first quarter of the slider, in both Gaussian modes.
+- Use the same normalized Gaussian kernel on both axes, with continuous strength scaling, fractional intermediate colors, and opaque clamped edges.
+- Keep bounded interactive previews and full-resolution exports, with no extra runtime dependencies.
+
 ## 1.18.2 — Redaction preview
 
 - Prepare one full-desktop Lorem image immediately after OCR, in the background worker, reusing its private screenshot snapshot.
