@@ -1,5 +1,6 @@
 // Included only by builds with CAPTURA_TEST; never part of the release binary.
 #include "shortcut.inc"
+#include "startup.inc"
 #include "retained_desktop.inc"
 #include "navigation.inc"
 #include "navigation_bounds.inc"
@@ -126,6 +127,7 @@ int selfTest(const std::wstring& directory) {
             failures++;
     };
     auto approx = [](REAL a, REAL b) { return std::abs(a - b) < 0.1f; };
+    testStartupContract(check);
     createMain();
     check(app.main != nullptr, L"Native hidden editor creation");
     if (!app.main)

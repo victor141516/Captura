@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.19.0
+
+- Support WinKit's `WINKIT_MANAGED=1` environment variable and identify managed sessions in the tray menu. Captura has no independent updater or Windows-startup registration.
+- Acquire the session singleton before initializing graphics or windows. Background launches remain silent on startup errors; a missing tray icon now exits with an error instead of showing the editor.
+- Publish a portable x64 package with `Captura.exe` at the ZIP root, a `winkit.json` manifest with the actual ZIP SHA-256, and `SHA256SUMS.txt`.
+- Include customizable capture shortcuts, retained full-desktop context, bounded navigation, native text selection, and four editable redaction modes from the preceding local previews.
+- Include the Gaussian symmetry, stable Lorem lines, original text colors, and natural typeface improvements.
+
 ## 1.18.6 — Redaction preview
 
 - Keep normal Lorem letter proportions instead of stretching width and height independently to fit the OCR rectangle.

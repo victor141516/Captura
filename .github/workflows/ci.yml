@@ -17,11 +17,20 @@ jobs:
       - name: Build and run native integration tests
         shell: pwsh
         run: ./test.ps1
-      - name: Build portable executable
+      - name: Verify isolated startup contract
         shell: pwsh
-        run: ./build.ps1
+        run: ./tests/startup.ps1 -Executable ./build/test-bin/Captura.exe
+      - name: Build and verify WinKit package
+        shell: pwsh
+        run: |
+          $manifest = [xml](Get-Content ./src/app.manifest)
+          $version = $manifest.assembly.assemblyIdentity.version -replace '\.0$', ''
+          ./release.ps1 -Version $version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Captura-win-x64
-          path: dist/Captura.exe
+          path: |
+            dist/release/*.zip
+            dist/release/winkit.json
+            dist/release/SHA256SUMS.txt
           if-no-files-found: error

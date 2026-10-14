@@ -4,7 +4,7 @@
 
 Captura is a tiny, portable Windows app for screenshots you can explain at a glance. Grab the part of your screen that matters, point to it with an arrow, add a few words, and paste it straight into a conversation.
 
-> **This branch previews text selection and redaction.** Press **O** to copy recognized text, or **B** to hide a rectangular area. Choose Gaussian, Pixelate, Lorem + Gaussian, or Lorem + Pixelate. Lorem modes replace the detected text before applying the effect, using a similar size and color. Move the slider right for a stronger effect. These experiments are local and have not been published as a stable release.
+Press **O** to copy recognized text, or **B** to hide a rectangular area. Choose Gaussian, Pixelate, Lorem + Gaussian, or Lorem + Pixelate. Lorem modes replace the detected text before applying the effect, using a similar size and color. Move the slider right for a stronger effect.
 
 Adjacent words are replaced as complete Lorem lines, with natural letter shapes and consistent alignment, preserving original colors such as blue links within a line. Lorem text is prepared once for each capture and stays fixed while you move or resize your rectangles. Both Lorem modes share that same prepared image; only the selected area appears changed in your screenshot.
 
@@ -22,7 +22,7 @@ The editor closes after a successful image copy or save. Captura stays in your s
 
 ## Small app. Clear screenshots.
 
-- **One small executable.** Around 400 KiB in this preview. Download `Captura.exe` and run it. No installer, account, or internet connection required. Targets 64-bit Windows 10 and 11. Text recognition needs an available Windows OCR language; this unpackaged preview has been verified on Windows 11.
+- **One small executable.** Around 420 KiB. Download `Captura.exe` and run it. No installer, account, or internet connection required. Targets 64-bit Windows 10 and 11. Text recognition needs an available Windows OCR language; the native OCR integration has been verified on Windows 11.
 - **Point precisely.** Bend arrows and lines by dragging their center diamond. Use one arrowhead or two. Number a sequence with counters; click and drag to add a pointer.
 - **Write clearly.** Text appears directly on the screenshot, with a rounded background and automatic black or white contrast. Use a shared color across your tools, or choose your own fill.
 - **Get the framing right.** Start with an area or a window, then drag the four corner squares to crop closer or reveal more of the surrounding desktop, captured at the same instant. Cropping stays reversible during the session.
@@ -43,8 +43,8 @@ The editor closes after a successful image copy or save. Captura stays in your s
 | Line | **L** |
 | Numbered counter | **C** |
 | Freehand brush | **P** |
-| Select and copy recognized text, in this preview | **O**, then drag |
-| Redact an area, in this preview | **B**, then drag |
+| Select and copy recognized text | **O**, then drag |
+| Redact an area | **B**, then drag |
 | Copy image, or selected text with Select text active | **Ctrl + C** |
 | Save to Pictures\Screenshots | **Ctrl + S** |
 | Choose a save location, in the editor | **Ctrl + Shift + S**, or **Shift + click Save** |
@@ -76,6 +76,8 @@ Prefer a different capture shortcut? Right-click Captura's tray icon and choose 
 Closing the editor keeps Captura in the tray. Click its icon to reopen the current screenshot, double-click to take another, or use the tray menu to exit. Starting a new screenshot replaces the current one.
 
 To update, save anything you want to keep, choose **Exit** from the old version's tray menu, and run the new `Captura.exe`.
+
+Captura also supports **WinKit**: the manager can start it quietly in the tray and handle downloads and updates. When managed, the tray menu shows **Managed by WinKit**. See the [WinKit integration contract](docs/winkit.md) for adding Captura to its catalog.
 
 ---
 

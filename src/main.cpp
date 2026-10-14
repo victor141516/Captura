@@ -24,10 +24,12 @@
 #include "capture_shortcut.h"
 #include "ocr.h"
 #include "redaction.h"
+#include "startup.h"
 
 using namespace Gdiplus;
 constexpr wchar_t AppClass[] = L"Captura.Native.Editor.1";
 constexpr wchar_t OverlayClass[] = L"Captura.Native.Overlay.1";
+const wchar_t* mainClassName = AppClass;
 constexpr UINT TrayMessage = WM_APP + 1, ActivateMessage = WM_APP + 2;
 constexpr UINT OcrMessage = WM_APP + 3;
 constexpr UINT_PTR ZoomRefineTimer = 2;
@@ -119,7 +121,7 @@ struct AppState {
     Tool tool = Tool::Arrow;
     bool dragging = false, creating = false, panning = false, background = false, sizing = false;
     bool windowMode = false, selecting = false, capturePending = false, captureRestore = false;
-    bool hotkey = false, tray = false, test = false, fillTarget = false;
+    bool hotkey = false, tray = false, test = false, fillTarget = false, managed = false;
     bool zooming = false;
     std::shared_ptr<captura::OcrJob> ocr;
     bool selectingText = false, hasTextSelection = false;
@@ -129,6 +131,9 @@ struct AppState {
 #ifdef CAPTURA_TEST
     bool shortcutPreview = false;
     bool testAutoOcr = false;
+    std::wstring lifecycleDirectory;
+    bool lifecycleNoTray = false;
+    unsigned lifecycleActivations = 0;
 #endif
     PointF dragStart{}, pan{}, initialPan{};
     Item initialItem;
@@ -148,6 +153,20 @@ struct AppState {
     std::array<bool, 512> tooltipAdded{};
 } app;
 captura::OcrService ocrService;
+#ifdef CAPTURA_TEST
+void recordLifecycle() {
+    if (app.lifecycleDirectory.empty())
+        return;
+    FILE* file = nullptr;
+    _wfopen_s(&file, (app.lifecycleDirectory + L"\\state.txt").c_str(), L"wb");
+    if (file) {
+        fprintf(file, "background=%d\nmanaged=%d\nvisible=%d\ntray=%d\nhotkey=%d\nactivations=%u\n",
+                app.background, app.managed, IsWindowVisible(app.main) != FALSE, app.tray,
+                app.hotkey, app.lifecycleActivations);
+        fclose(file);
+    }
+}
+#endif
 
 const captura::OcrReport* ocrReport() {
     return app.ocr && app.ocr->complete.load(std::memory_order_acquire) ? &app.ocr->report
@@ -3604,6 +3623,12 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     return DefWindowProcW(hwnd, msg, w, l);
 }
 void addTray() {
+#ifdef CAPTURA_TEST
+    if (!app.lifecycleDirectory.empty()) {
+        app.tray = !app.lifecycleNoTray;
+        return;
+    }
+#endif
     NOTIFYICONDATAW n{};
     n.cbSize = sizeof(n);
     n.hWnd = app.main;
@@ -3617,6 +3642,12 @@ void addTray() {
     app.tray = Shell_NotifyIconW(NIM_ADD, &n) != FALSE;
 }
 void removeTray() {
+#ifdef CAPTURA_TEST
+    if (!app.lifecycleDirectory.empty()) {
+        app.tray = false;
+        return;
+    }
+#endif
     NOTIFYICONDATAW n{};
     n.cbSize = sizeof(n);
     n.hWnd = app.main;
@@ -3879,6 +3910,10 @@ void showCaptureShortcutDialog() {
 
 void trayMenu() {
     HMENU menu = CreatePopupMenu();
+    if (app.managed) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Managed by WinKit");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
     std::wstring captureLabel =
         std::wstring(ui::kNewCapture) + L"\t" + captureShortcutName(app.captureShortcut);
     AppendMenuW(menu, MF_STRING, 1, captureLabel.c_str());
@@ -4202,6 +4237,13 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             invalidate();
         return 0;
     case ActivateMessage:
+#ifdef CAPTURA_TEST
+        if (!app.lifecycleDirectory.empty()) {
+            ++app.lifecycleActivations;
+            recordLifecycle();
+            return 0;
+        }
+#endif
         ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
         return 0;
@@ -4306,7 +4348,7 @@ void registerClasses() {
     WNDCLASSW wc{};
     wc.hInstance = app.instance;
     wc.lpfnWndProc = EditorProc;
-    wc.lpszClassName = AppClass;
+    wc.lpszClassName = mainClassName;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hIcon = app.icon;
     wc.style = CS_DBLCLKS;
@@ -4327,8 +4369,8 @@ void createMain() {
     h = std::min(h, static_cast<int>(mi.rcWork.bottom - mi.rcWork.top));
     int x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2,
         y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - h) / 2;
-    app.main = CreateWindowExW(0, AppClass, ui::kAppName, WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr,
-                               nullptr, app.instance, nullptr);
+    app.main = CreateWindowExW(0, mainClassName, ui::kAppName, WS_OVERLAPPEDWINDOW, x, y, w, h,
+                               nullptr, nullptr, app.instance, nullptr);
     if (app.main)
         initTooltips();
 }
@@ -4340,19 +4382,71 @@ int selfTest(const std::wstring& directory);
 #endif
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     app.instance = instance;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    const auto options = startupOptions(argc, argv);
+    app.background = options.background;
+    app.managed = options.managed;
+    bool isolatedTest = false;
+    std::wstring mutexName = L"Local\\Captura.Native.Portable.Singleton.1";
+#ifdef CAPTURA_TEST
+    std::wstring lifecycleClass;
+    isolatedTest = argc == 1 || (argc >= 3 && (wcscmp(argv[1], L"--shortcut-preview") == 0 ||
+                                               wcscmp(argv[1], L"--self-test") == 0));
+    if (argc >= 3 && wcscmp(argv[1], L"--lifecycle-test") == 0) {
+        app.test = true;
+        app.lifecycleDirectory = argv[2];
+        std::wstring id =
+            app.lifecycleDirectory.substr(app.lifecycleDirectory.find_last_of(L"\\/") + 1);
+        lifecycleClass = std::wstring(AppClass) + L".Test." + id;
+        mainClassName = lifecycleClass.c_str();
+        mutexName += L".Test." + id;
+        for (int n = 3; n < argc; ++n)
+            app.lifecycleNoTray |= wcscmp(argv[n], L"--no-tray") == 0;
+    }
+#endif
+    // Acquire the session-local singleton before creating windows, graphics,
+    // tray icons, or registering shortcuts. Duplicate background launches do
+    // nothing visible, even when graphics initialization would otherwise fail.
+    if (!isolatedTest) {
+        app.mutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
+        DWORD result = GetLastError();
+        if (!app.mutex) {
+            LocalFree(argv);
+            if (!app.background)
+                error(nullptr, ui::kErrorStartup);
+            return 1;
+        }
+        if (result == ERROR_ALREADY_EXISTS) {
+            if (!app.background) {
+                HWND existing = FindWindowW(mainClassName, nullptr);
+                if (existing) {
+                    DWORD pid = 0;
+                    GetWindowThreadProcessId(existing, &pid);
+                    AllowSetForegroundWindow(pid);
+                    PostMessageW(existing, ActivateMessage, 0, 0);
+                }
+            }
+            LocalFree(argv);
+            CloseHandle(app.mutex);
+            return 0;
+        }
+    }
     ULONG languageCount = 0;
     SetThreadPreferredUILanguages(MUI_LANGUAGE_NAME, L"en-US\0", &languageCount);
     GdiplusStartupInput gdiplusInput;
     if (GdiplusStartup(&app.gdiplus, &gdiplusInput, nullptr) != Ok) {
-        error(nullptr, ui::kErrorGraphics);
+        LocalFree(argv);
+        if (app.mutex)
+            CloseHandle(app.mutex);
+        if (!app.background)
+            error(nullptr, ui::kErrorGraphics);
         return 1;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     initializeDefaults();
     app.icon = makeIcon();
     registerClasses();
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 #ifdef CAPTURA_TEST
     if (argc == 1 || (argc >= 3 && wcscmp(argv[1], L"--shortcut-preview") == 0)) {
         app.test = true;
@@ -4388,47 +4482,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         return result;
     }
 #endif
-    for (int i = 1; i < argc; i++)
-        if (wcscmp(argv[i], L"--background") == 0)
-            app.background = true;
     LocalFree(argv);
-    app.mutex = CreateMutexW(nullptr, TRUE, L"Local\\Captura.Native.Portable.Singleton.1");
-    if (!app.mutex) {
-        error(nullptr, ui::kErrorStartup);
-        GdiplusShutdown(app.gdiplus);
-        return 1;
-    }
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (!app.background) {
-            HWND existing = FindWindowW(AppClass, nullptr);
-            if (existing) {
-                DWORD pid = 0;
-                GetWindowThreadProcessId(existing, &pid);
-                AllowSetForegroundWindow(pid);
-                PostMessageW(existing, ActivateMessage, 0, 0);
-            }
-        }
-        CloseHandle(app.mutex);
-        DestroyIcon(app.icon);
-        GdiplusShutdown(app.gdiplus);
-        return 0;
-    }
     createMain();
     if (!app.main) {
-        error(nullptr, ui::kErrorEditor);
+        if (!app.background)
+            error(nullptr, ui::kErrorEditor);
         CloseHandle(app.mutex);
         DestroyIcon(app.icon);
         GdiplusShutdown(app.gdiplus);
         return 1;
     }
     app.settingsPath = captureSettingsPath();
+#ifdef CAPTURA_TEST
+    if (!app.lifecycleDirectory.empty())
+        app.settingsPath = app.lifecycleDirectory + L"\\settings.ini";
+#endif
     app.captureShortcut = loadCaptureShortcut(app.settingsPath);
     app.status = captureHint();
     addTray();
-    app.hotkey =
-        RegisterHotKey(app.main, app.hotkeyId, app.captureShortcut.modifiers | MOD_NOREPEAT,
-                       app.captureShortcut.key) != FALSE;
-    if (!app.hotkey) {
+    if (!app.test && (!app.background || app.tray))
+        app.hotkey =
+            RegisterHotKey(app.main, app.hotkeyId, app.captureShortcut.modifiers | MOD_NOREPEAT,
+                           app.captureShortcut.key) != FALSE;
+    if (!app.hotkey && !app.test) {
         app.status = ui::kShortcutBusy;
         if (!app.background)
             MessageBoxW(
@@ -4436,7 +4512,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
                 (captureShortcutName(app.captureShortcut) + ui::kShortcutBusyDetails).c_str(),
                 ui::kAppName, MB_OK | MB_ICONINFORMATION);
     }
-    if (!app.background || !app.tray)
+    int exitCode = app.background && !app.tray ? 1 : 0;
+#ifdef CAPTURA_TEST
+    recordLifecycle();
+#endif
+    if (exitCode)
+        DestroyWindow(app.main);
+    else if (!app.background)
         ShowWindow(app.main, show == SW_HIDE ? SW_SHOW : show);
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -4451,7 +4533,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     ReleaseMutex(app.mutex);
     CloseHandle(app.mutex);
     GdiplusShutdown(app.gdiplus);
-    return 0;
+    return exitCode;
 }
 
 #ifdef CAPTURA_TEST

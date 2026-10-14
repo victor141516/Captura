@@ -49,13 +49,13 @@ Format C++ changes with clang-format 19 and the checked-in `.clang-format`. Incl
 
 ## Release
 
-Update the version in `app.rc` and `app.manifest`, run the tests, and build the normal executable. Package `Captura.exe`, the product README, and a SHA-256 checksum. Release binaries should remain portable and should not include test code or build outputs.
+Update the version in `app.rc` and `app.manifest`, run the tests and `tests/startup.ps1`, then build with `release.ps1`. The release script packages the normal executable at the ZIP root and generates the WinKit manifest and SHA-256 checksums. Release binaries remain portable and never include test code or build outputs. See [WinKit integration](winkit.md) for the startup and publication contract.
 
 The app keeps editable content in memory during its session. A saved PNG contains the final visible frame, not an editable project.
 
 ## OCR preview
 
-The local `experiment/ocr-text-selection` branch scans the original retained desktop, without annotations, once when `finishCapture` loads an image. The initial frame does not limit recognition. A dedicated MTA worker owns a private bitmap clone, so it never locks the bitmap used by the UI renderer. A newer capture cancels the previous job and replaces pending work; result IDs prevent stale completion messages from updating a newer capture. Shutdown joins the worker before GDI+ is released.
+Captura scans the original retained desktop, without annotations, once when `finishCapture` loads an image. The initial frame does not limit recognition. A dedicated MTA worker owns a private bitmap clone, so it never locks the bitmap used by the UI renderer. A newer capture cancels the previous job and replaces pending work; result IDs prevent stale completion messages from updating a newer capture. Shutdown joins the worker before GDI+ is released.
 
 Windows OCR receives native-resolution blocks up to 2600 pixels per side, or the smaller system limit, with 128 pixels of context around seams. Words belong to the tile core containing their center. Row fragments are merged geometrically. This preview uses rectangular word bounds and top-to-bottom / left-to-right ordering; complex columns, rotated text, and scripts requiring other reading orders need further evaluation.
 
