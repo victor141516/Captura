@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.19.1
+
+- Build with standard C++20 coroutines so native Windows OCR remains compatible with the newer MSVC toolchain on GitHub's Windows runner.
+- Include the complete WinKit startup and release contract introduced in 1.19.0, which was prepared as a draft and not published as stable.
+
 ## 1.19.0
 
 - Support WinKit's `WINKIT_MANAGED=1` environment variable and identify managed sessions in the tray menu. Captura has no independent updater or Windows-startup registration.

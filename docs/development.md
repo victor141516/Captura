@@ -1,6 +1,6 @@
 # Development
 
-Captura targets Windows 10 / 11 x64 and uses C++17, Win32, and GDI+. The C++ runtime is linked statically. Running the app requires only Windows components.
+Captura targets Windows 10 / 11 x64 and uses C++20, Win32, and GDI+. The C++ runtime is linked statically. Running the app requires only Windows components.
 
 ## Build
 

@@ -3297,12 +3297,14 @@ void drawOverlayForeground(Graphics& g, HWND hwnd) {
     if (selected.right > selected.left && selected.bottom > selected.top) {
         if (app.windowMode) {
             SolidBrush tint(Color(65, 0, 117, 255));
-            g.FillRectangle(&tint, selected.left, selected.top, selected.right - selected.left,
-                            selected.bottom - selected.top);
+            g.FillRectangle(&tint, Rect(int(selected.left), int(selected.top),
+                                        int(selected.right - selected.left),
+                                        int(selected.bottom - selected.top)));
         }
         Pen border(Blue, 2);
-        g.DrawRectangle(&border, selected.left, selected.top, selected.right - selected.left - 1,
-                        selected.bottom - selected.top - 1);
+        g.DrawRectangle(&border, Rect(int(selected.left), int(selected.top),
+                                      int(selected.right - selected.left - 1),
+                                      int(selected.bottom - selected.top - 1)));
         std::wstring size = std::to_wstring(selected.right - selected.left) + L" × " +
                             std::to_wstring(selected.bottom - selected.top) + L" px";
         RectF badgeRect = overlayBadge(selected);

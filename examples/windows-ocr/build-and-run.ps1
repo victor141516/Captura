@@ -23,7 +23,7 @@ try {
         (Join-Path $kits "Lib\$($sdk.Name)\ucrt\x64"),
         (Join-Path $kits "Lib\$($sdk.Name)\um\x64")
     ) -join ';'
-    & (Join-Path $toolsDirectory.FullName 'bin\Hostx64\x64\cl.exe') /nologo /std:c++17 /utf-8 /W4 /O1 /Os /GL /MT /EHsc /DNDEBUG /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX ocr-test.cpp /Fe:ocr-test.exe /link /LTCG /OPT:REF /OPT:ICF windowsapp.lib user32.lib gdi32.lib ole32.lib
+    & (Join-Path $toolsDirectory.FullName 'bin\Hostx64\x64\cl.exe') /nologo /std:c++20 /utf-8 /W4 /O1 /Os /GL /MT /EHsc /DNDEBUG /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX ocr-test.cpp /Fe:ocr-test.exe /link /LTCG /OPT:REF /OPT:ICF windowsapp.lib user32.lib gdi32.lib ole32.lib
     if ($LASTEXITCODE) { throw 'OCR probe compilation failed.' }
     & .\ocr-test.exe | Tee-Object -FilePath result.txt
     $result = $LASTEXITCODE

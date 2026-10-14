@@ -32,7 +32,7 @@ Update the version resources, run `test.ps1`, then run the isolated process test
 
 ```powershell
 .\tests\startup.ps1 -Executable .\build\test-bin\Captura.exe
-.\release.ps1 -Version 1.19.0
+.\release.ps1 -Version 1.19.1
 ```
 
 Use the version of the release being built. `release.ps1` checks it against the compiled executable, produces `Captura-v<version>-win-x64-self-contained.zip`, verifies the executable is at the ZIP root, and generates `winkit.json` and `SHA256SUMS.txt` from the resulting bytes. Upload all three files to the same stable, immutable GitHub release, along with `package/Captura.exe` for direct download. Do not publish a test executable or a debug build.

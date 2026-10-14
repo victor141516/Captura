@@ -49,7 +49,7 @@ try {
     if ($LASTEXITCODE) { throw 'Resource compilation failed.' }
 
     $options = @(
-        '/nologo', '/std:c++17', '/utf-8', '/W4', '/O1', '/Os', '/GL', '/Gy', '/Gw',
+        '/nologo', '/std:c++20', '/utf-8', '/W4', '/O1', '/Os', '/GL', '/Gy', '/Gw',
         '/MT', '/EHsc', '/DNDEBUG', '/DUNICODE', '/D_UNICODE',
         '/DWIN32_LEAN_AND_MEAN', '/DNOMINMAX', '/DGDIPVER=0x0110'
     )

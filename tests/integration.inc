@@ -1,4 +1,5 @@
 // Included only by builds with CAPTURA_TEST; never part of the release binary.
+std::unique_ptr<Bitmap> fixture();
 #include "shortcut.inc"
 #include "startup.inc"
 #include "retained_desktop.inc"
