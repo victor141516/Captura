@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.6 — Redaction preview
+
+- Keep normal Lorem letter proportions instead of stretching width and height independently to fit the OCR rectangle.
+- Choose from similarly long replacement phrases that naturally fit the line, with a uniform font scale and vertical centering. Exact bounding-box coverage no longer overrides letter shape.
+- Preserve whole-line alignment, original color spans, stable one-time preparation, and full-resolution effects.
+
 ## 1.18.5 — Redaction preview
 
 - Preserve original text colors within complete Lorem lines, including blue links surrounded by dark text, in both Lorem effects.

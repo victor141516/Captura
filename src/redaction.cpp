@@ -72,7 +72,7 @@ struct Replacement {
         ARGB color;
     };
     RectF bounds;
-    ARGB background, color;
+    ARGB background;
     std::wstring text;
     std::vector<InkSpan> spans;
 };
@@ -290,7 +290,7 @@ ARGB textColor(Raster& pixels, const RectF& bounds, const Rect& context, ARGB bg
     });
     return furthest;
 }
-Replacement replacement(Raster& pixels, const TextRun& run, const Rect& context, uint32_t& seed) {
+Replacement replacement(Raster& pixels, const TextRun& run, const Rect& context) {
     const auto& word = run.line;
     Rect ink = wordRegion(word.bounds, 0), ring = wordRegion(word.bounds, 4);
     Histogram background;
@@ -308,7 +308,7 @@ Replacement replacement(Raster& pixels, const TextRun& run, const Rect& context,
     });
     ARGB bg = dominant(background, 0xffffffff);
     ARGB fg = textColor(pixels, word.bounds, context, bg);
-    Replacement result{word.bounds, bg, fg, loremText(word.text, seed), {}};
+    Replacement result{word.bounds, bg, word.text, {}};
     float left = word.bounds.X - 2;
     for (size_t n = 0; n < run.words.size(); ++n) {
         const auto& current = run.words[n]->bounds;
@@ -439,7 +439,7 @@ std::shared_ptr<Gdiplus::Bitmap> prepareLoremImage(std::unique_ptr<Gdiplus::Bitm
         for (const auto& run : runs) {
             if (stopped())
                 return {};
-            substitutes.push_back(replacement(pixels, run, context, seed));
+            substitutes.push_back(replacement(pixels, run, context));
         }
     }
     if (!substitutes.empty()) {
@@ -461,19 +461,43 @@ std::shared_ptr<Gdiplus::Bitmap> prepareLoremImage(std::unique_ptr<Gdiplus::Bitm
             if (stopped())
                 return {};
             GraphicsPath glyphs;
-            if (glyphs.AddString(word.text.c_str(), int(word.text.size()), &family,
-                                 FontStyleRegular, 32, PointF(0, 0),
-                                 StringFormat::GenericTypographic()) != Ok)
-                return {};
             RectF ink;
-            glyphs.GetBounds(&ink);
-            if (ink.Width <= 0 || ink.Height <= 0)
+            float scale = 0, best = -1;
+            // Choose similarly long Lorem content that naturally fits the line.
+            // Letter shapes always use one uniform scale, never independent
+            // horizontal/vertical stretching to force an exact bounding box.
+            for (int attempt = 0; attempt < 6; ++attempt) {
+                if (stopped())
+                    return {};
+                auto text = loremText(word.text, seed);
+                GraphicsPath candidate;
+                if (candidate.AddString(text.c_str(), int(text.size()), &family, FontStyleRegular,
+                                        32, PointF(0, 0), StringFormat::GenericTypographic()) != Ok)
+                    return {};
+                RectF box;
+                candidate.GetBounds(&box);
+                if (box.Width <= 0 || box.Height <= 0)
+                    continue;
+                float fit =
+                    std::min(word.bounds.Width / box.Width, word.bounds.Height / box.Height);
+                float coverage =
+                    (box.Width * fit / word.bounds.Width) * (box.Height * fit / word.bounds.Height);
+                if (coverage > best) {
+                    glyphs.Reset();
+                    if (glyphs.AddPath(&candidate, FALSE) != Ok)
+                        return {};
+                    ink = box;
+                    scale = fit;
+                    best = coverage;
+                }
+                if (best >= 0.97f)
+                    break;
+            }
+            if (scale <= 0)
                 continue;
-            REAL sy = word.bounds.Height / ink.Height;
-            // A whole line shares one baseline, size and horizontal scale.
-            // Never fit individual replacement words to separate OCR boxes.
-            REAL sx = word.bounds.Width / ink.Width;
-            Matrix transform(sx, 0, 0, sy, word.bounds.X - ink.X * sx, word.bounds.Y - ink.Y * sy);
+            float top = word.bounds.Y + (word.bounds.Height - ink.Height * scale) / 2;
+            Matrix transform(scale, 0, 0, scale, word.bounds.X - ink.X * scale,
+                             top - ink.Y * scale);
             glyphs.Transform(&transform);
             std::vector<float> gaps;
             if (word.spans.size() > 1) {

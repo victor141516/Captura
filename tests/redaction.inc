@@ -15,11 +15,13 @@ std::vector<ARGB> redactionPixels(Bitmap& bitmap) {
 #include "gaussian.inc"
 #include "lorem_lines.inc"
 #include "lorem_colors.inc"
+#include "lorem_typography.inc"
 template <typename Check> void testRedaction(const std::wstring& directory, Check check) {
     using namespace captura;
     testGaussian(directory, check);
     testLoremLines(directory, check);
     testLoremColors(directory, check);
+    testLoremTypography(check);
     app.image = std::make_unique<Bitmap>(800, 400, PixelFormat32bppARGB);
     auto recognition = std::make_shared<OcrJob>();
     recognition->report.state = OcrState::Ready;
