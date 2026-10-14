@@ -6,7 +6,7 @@ Captura is a tiny, portable Windows app for screenshots you can explain at a gla
 
 > **This branch previews text selection and redaction.** Press **O** to copy recognized text, or **B** to hide a rectangular area. Choose Gaussian, Pixelate, Lorem + Gaussian, or Lorem + Pixelate. Lorem modes replace the detected text before applying the effect, using a similar size and color. Move the slider right for a stronger effect. These experiments are local and have not been published as a stable release.
 
-Adjacent words are replaced as complete Lorem lines, with consistent lettering and alignment. Lorem text is prepared once for each capture and stays fixed while you move or resize your rectangles. Both Lorem modes share that same prepared image; only the selected area appears changed in your screenshot.
+Adjacent words are replaced as complete Lorem lines, with consistent lettering and alignment, preserving original colors such as blue links within a line. Lorem text is prepared once for each capture and stays fixed while you move or resize your rectangles. Both Lorem modes share that same prepared image; only the selected area appears changed in your screenshot.
 
 [**Download for Windows x64 →**](https://github.com/victor141516/Captura/releases/latest)
 

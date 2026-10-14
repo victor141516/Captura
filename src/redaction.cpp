@@ -67,11 +67,20 @@ int colorDistance(ARGB a, ARGB b) {
     return r * r + g * g + blue * blue;
 }
 struct Replacement {
+    struct InkSpan {
+        float left, right;
+        ARGB color;
+    };
     RectF bounds;
     ARGB background, color;
     std::wstring text;
+    std::vector<InkSpan> spans;
 };
-std::vector<OcrWord> textRuns(const OcrReport& report) {
+struct TextRun {
+    OcrWord line;
+    std::vector<const OcrWord*> words;
+};
+std::vector<TextRun> textRuns(const OcrReport& report) {
     struct Row {
         RectF bounds;
         std::vector<const OcrWord*> words;
@@ -110,18 +119,19 @@ std::vector<OcrWord> textRuns(const OcrReport& report) {
         } else
             rows.push_back({b, {word}});
     }
-    std::vector<OcrWord> runs;
+    std::vector<TextRun> runs;
     for (auto& row : rows) {
         std::stable_sort(
             row.words.begin(), row.words.end(),
             [](const OcrWord* a, const OcrWord* b) { return a->bounds.X < b->bounds.X; });
-        OcrWord run;
+        TextRun segment;
+        auto& run = segment.line;
         for (const auto* word : row.words) {
             // Split separate columns or labels, but keep normal interword spaces.
             if (!run.text.empty() && word->bounds.X - run.bounds.GetRight() >
                                          1.5f * std::max(run.bounds.Height, word->bounds.Height)) {
-                runs.push_back(std::move(run));
-                run = {};
+                runs.push_back(std::move(segment));
+                segment = {};
             }
             if (run.text.empty())
                 run = *word;
@@ -130,11 +140,14 @@ std::vector<OcrWord> textRuns(const OcrReport& report) {
                 run.text += word->text;
                 run.bounds = unite(run.bounds, word->bounds);
             }
+            segment.words.push_back(word);
         }
         if (!run.text.empty())
-            runs.push_back(std::move(run));
+            runs.push_back(std::move(segment));
     }
-    std::stable_sort(runs.begin(), runs.end(), [](const OcrWord& a, const OcrWord& b) {
+    std::stable_sort(runs.begin(), runs.end(), [](const TextRun& left, const TextRun& right) {
+        const auto& a = left.line;
+        const auto& b = right.line;
         return a.bounds.Y < b.bounds.Y || (a.bounds.Y == b.bounds.Y && a.bounds.X < b.bounds.X);
     });
     return runs;
@@ -234,9 +247,53 @@ std::wstring loremText(const std::wstring& original, uint32_t& seed) {
         text.front() = wchar_t(std::towupper(text.front()));
     return text;
 }
-Replacement replacement(Raster& pixels, const OcrWord& word, const Rect& context, uint32_t& seed) {
+ARGB textColor(Raster& pixels, const RectF& bounds, const Rect& context, ARGB bg) {
+    Rect ink = wordRegion(bounds, 0);
+    auto visit = [&](auto sample) {
+        for (int y = std::max(context.Y, ink.Y); y < std::min(context.GetBottom(), ink.GetBottom());
+             ++y)
+            for (int x = std::max(context.X, ink.X);
+                 x < std::min(context.GetRight(), ink.GetRight()); ++x)
+                sample(pixels.at(x - context.X, y - context.Y));
+    };
+    int strongest = 0;
+    ARGB furthest = bg;
+    visit([&](ARGB color) {
+        int distance = colorDistance(color, bg);
+        if (distance > strongest) {
+            strongest = distance;
+            furthest = color | 0xff000000;
+        }
+    });
+    Histogram foreground;
+    // Relative contrast also recognizes faint colored glyphs. Never invent a
+    // black/white foreground when no samples reach a fixed contrast threshold.
+    int threshold = std::max(1, strongest / 3);
+    visit([&](ARGB color) {
+        if (colorDistance(color, bg) > threshold)
+            countColor(foreground, color);
+    });
+    ARGB estimate = dominant(foreground, furthest);
+    auto key = [](ARGB color) {
+        return (((color >> 16) & 255) >> 3) << 10 | (((color >> 8) & 255) >> 3) << 5 |
+               ((color & 255) >> 3);
+    };
+    // Within the winning color cluster, prefer solid glyph cores over blended
+    // antialiased edges, which would lighten blue or darken white lettering.
+    strongest = -1;
+    visit([&](ARGB color) {
+        int distance = colorDistance(color, bg);
+        if (key(color) == key(estimate) && distance > strongest) {
+            strongest = distance;
+            furthest = color | 0xff000000;
+        }
+    });
+    return furthest;
+}
+Replacement replacement(Raster& pixels, const TextRun& run, const Rect& context, uint32_t& seed) {
+    const auto& word = run.line;
     Rect ink = wordRegion(word.bounds, 0), ring = wordRegion(word.bounds, 4);
-    Histogram background, foreground;
+    Histogram background;
     auto visit = [&](Rect area, auto sample) {
         int left = std::max(context.X, area.X), top = std::max(context.Y, area.Y),
             right = std::min(context.GetRight(), area.GetRight()),
@@ -250,18 +307,24 @@ Replacement replacement(Raster& pixels, const OcrWord& word, const Rect& context
             countColor(background, color);
     });
     ARGB bg = dominant(background, 0xffffffff);
-    int strongest = 0;
-    visit(ink,
-          [&](int, int, ARGB color) { strongest = std::max(strongest, colorDistance(color, bg)); });
-    int threshold = std::max(8 * 8, strongest / 3);
-    visit(ink, [&](int, int, ARGB color) {
-        if (colorDistance(color, bg) > threshold)
-            countColor(foreground, color);
-    });
-    ARGB fg = dominant(foreground, colorDistance(bg, 0xff000000) > colorDistance(bg, 0xffffffff)
-                                       ? 0xff000000
-                                       : 0xffffffff);
-    return {word.bounds, bg, fg, loremText(word.text, seed)};
+    ARGB fg = textColor(pixels, word.bounds, context, bg);
+    Replacement result{word.bounds, bg, fg, loremText(word.text, seed), {}};
+    float left = word.bounds.X - 2;
+    for (size_t n = 0; n < run.words.size(); ++n) {
+        const auto& current = run.words[n]->bounds;
+        float right = n + 1 < run.words.size()
+                          ? (current.GetRight() + run.words[n + 1]->bounds.X) / 2
+                          : word.bounds.GetRight() + 2;
+        ARGB color = textColor(pixels, current, context, bg);
+        if (colorDistance(color, fg) <= 3 * 8 * 8)
+            color = fg;
+        if (!result.spans.empty() && result.spans.back().color == color)
+            result.spans.back().right = right;
+        else
+            result.spans.push_back({left, right, color});
+        left = right;
+    }
+    return result;
 }
 bool pixelate(Bitmap& image, int block) {
     Raster pixels(image, ImageLockModeRead | ImageLockModeWrite);
@@ -412,9 +475,57 @@ std::shared_ptr<Gdiplus::Bitmap> prepareLoremImage(std::unique_ptr<Gdiplus::Bitm
             REAL sx = word.bounds.Width / ink.Width;
             Matrix transform(sx, 0, 0, sy, word.bounds.X - ink.X * sx, word.bounds.Y - ink.Y * sy);
             glyphs.Transform(&transform);
-            SolidBrush foreground(Color(word.color));
-            if (g.FillPath(&foreground, &glyphs) != Ok)
-                return {};
+            std::vector<float> gaps;
+            if (word.spans.size() > 1) {
+                int count = glyphs.GetPointCount();
+                std::vector<PointF> points(count);
+                std::vector<BYTE> types(count);
+                std::vector<std::pair<float, float>> contours;
+                if (glyphs.GetPathPoints(points.data(), count) == Ok &&
+                    glyphs.GetPathTypes(types.data(), count) == Ok) {
+                    for (int n = 0; n < count; ++n) {
+                        if ((types[n] & PathPointTypePathTypeMask) == PathPointTypeStart)
+                            contours.push_back({points[n].X, points[n].X});
+                        else if (!contours.empty()) {
+                            contours.back().first = std::min(contours.back().first, points[n].X);
+                            contours.back().second = std::max(contours.back().second, points[n].X);
+                        }
+                    }
+                    std::sort(contours.begin(), contours.end());
+                    float right = word.bounds.X;
+                    for (const auto& contour : contours) {
+                        if (contour.first - right > word.bounds.Height * 0.16f)
+                            gaps.push_back((right + contour.first) / 2);
+                        right = std::max(right, contour.second);
+                    }
+                }
+            }
+            // Color clips reuse the complete line path and its one transform.
+            // They do not reposition, resize, or regenerate individual words.
+            float left = word.spans.front().left;
+            for (size_t n = 0; n < word.spans.size(); ++n) {
+                const auto& span = word.spans[n];
+                float right = span.right;
+                // Prefer a nearby space rather than changing color mid-glyph.
+                if (n + 1 < word.spans.size()) {
+                    float closest = word.bounds.Height;
+                    for (float gap : gaps)
+                        if (gap > left + 1 && gap < word.spans[n + 1].right - 1 &&
+                            std::abs(gap - span.right) < closest) {
+                            closest = std::abs(gap - span.right);
+                            right = gap;
+                        }
+                }
+                auto saved = g.Save();
+                g.SetClip(RectF(left, word.bounds.Y - 2, right - left, word.bounds.Height + 4),
+                          CombineModeIntersect);
+                SolidBrush foreground(Color(span.color));
+                Status status = g.FillPath(&foreground, &glyphs);
+                g.Restore(saved);
+                if (status != Ok)
+                    return {};
+                left = right;
+            }
         }
     }
     return stopped() ? std::shared_ptr<Bitmap>{} : std::shared_ptr<Bitmap>(std::move(snapshot));

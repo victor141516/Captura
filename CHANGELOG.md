@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.5 — Redaction preview
+
+- Preserve original text colors within complete Lorem lines, including blue links surrounded by dark text, in both Lorem effects.
+- Estimate foreground color from solid glyph cores rather than blended edges, preserving white lettering and avoiding black/white fallbacks for faint colored text.
+- Reuse one line path and transform for every color span, favoring nearby gaps for color transitions. Color sampling still runs only once after OCR.
+
 ## 1.18.4 — Redaction preview
 
 - Replace adjacent words as complete Lorem lines with one baseline, height, color, and horizontal scale, instead of fitting every replacement word to a separate OCR box.
