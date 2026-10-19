@@ -48,6 +48,16 @@ try {
     & $resourceCompiler /nologo "/fo$buildDirectory\app.res" app.rc
     if ($LASTEXITCODE) { throw 'Resource compilation failed.' }
 
+    # Vendored quirc (C, ISC) keeps its upstream source; it compiles at /W3 so the
+    # project's /W4 applies only to Captura's own code.
+    $quircSources = @('quirc\quirc.c', 'quirc\decode.c', 'quirc\identify.c', 'quirc\version_db.c')
+    $quircObjects = $quircSources | ForEach-Object {
+        Join-Path $buildDirectory ([IO.Path]::GetFileNameWithoutExtension($_) + '.obj')
+    }
+    & $compiler /nologo /c /W3 /O1 /Os /GL /Gy /Gw /MT /DNDEBUG `
+        "/Fo$buildDirectory\" @quircSources
+    if ($LASTEXITCODE) { throw 'quirc compilation failed.' }
+
     $options = @(
         '/nologo', '/std:c++20', '/utf-8', '/W4', '/O1', '/Os', '/GL', '/Gy', '/Gw',
         '/MT', '/EHsc', '/DNDEBUG', '/DUNICODE', '/D_UNICODE',
@@ -55,7 +65,9 @@ try {
     )
     if ($WithTests) { $options += '/DCAPTURA_TEST' }
     $options += @(
-        'main.cpp', 'ocr.cpp', 'redaction.cpp', "/Fo$buildDirectory\", "/Fe$output\Captura.exe",
+        'main.cpp', 'ocr.cpp', 'redaction.cpp', 'qr.cpp'
+    ) + $quircObjects + @(
+        "/Fo$buildDirectory\", "/Fe$output\Captura.exe",
         '/link', "$buildDirectory\app.res", '/SUBSYSTEM:WINDOWS', '/MACHINE:X64',
         '/LTCG', '/OPT:REF', '/OPT:ICF', '/INCREMENTAL:NO', '/DYNAMICBASE',
         '/NXCOMPAT', '/HIGHENTROPYVA', '/MANIFEST:NO',

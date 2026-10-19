@@ -3,9 +3,9 @@
 // The interface is English regardless of the system language.
 namespace ui {
 inline constexpr wchar_t kAppName[] = L"Captura";
-inline constexpr const wchar_t* kTooltips[] = {L"Select (V)",    L"Arrow (A)",       L"Text (T)",
-                                               L"Rectangle (R)", L"Line (L)",        L"Counter (C)",
-                                               L"Brush (P)",     L"Select text (O)", L"Redact (B)"};
+inline constexpr const wchar_t* kTooltips[] = {
+    L"Select (V)",  L"Arrow (A)", L"Text (T)",        L"Rectangle (R)", L"Line (L)",
+    L"Counter (C)", L"Brush (P)", L"Select text (O)", L"Redact (B)",    L"Scan QR (Q)"};
 inline constexpr wchar_t kUndo[] = L"Undo (Ctrl+Z)";
 inline constexpr wchar_t kRedo[] = L"Redo (Ctrl+Y)";
 inline constexpr wchar_t kCopy[] = L"Copy (Ctrl+C)";
@@ -81,7 +81,7 @@ inline constexpr wchar_t kHelp[] =
     L"Esc: cancel capture or selection\n\n"
     L"TOOLS\n"
     L"V Select   A Arrow   T Text\n"
-    L"R Rectangle   L Line   C Counter   P Brush   O Select text   B Redact\n\n"
+    L"R Rectangle   L Line   C Counter   P Brush   O Select text   B Redact   Q Scan QR\n\n"
     L"REDACT\n"
     L"B: drag a rectangle to hide an area. Choose Gaussian or Pixelate.\n"
     L"Lorem variants replace detected text before blurring or pixelating.\n"
@@ -95,6 +95,11 @@ inline constexpr wchar_t kHelp[] =
     L"Ctrl + C copies the last text selection. The editor stays open.\n"
     L"CPU and RAM metrics cover the whole process, including other editor work.\n"
     L"Average CPU is normalized across all logical processors.\n\n"
+    L"SCAN QR\n"
+    L"Q: drag around a QR code, or click the image to scan the visible frame.\n"
+    L"Found codes are highlighted. Click one to copy its content.\n"
+    L"Ctrl + click opens http(s) links in the browser; other content is copied.\n"
+    L"QR overlays are never exported. Esc clears the results.\n\n"
     L"SHARE\n"
     L"Ctrl + C: copy image\n"
     L"Ctrl + S: save PNG to Pictures\\Screenshots\n"

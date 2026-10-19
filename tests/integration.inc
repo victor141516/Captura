@@ -51,6 +51,7 @@ std::unique_ptr<Bitmap> fixture() {
 }
 #include "ocr.inc"
 #include "redaction.inc"
+#include "qr.inc"
 void addFixtureItems() {
     app.canvas = {};
     app.pinnedCanvas = false;
@@ -755,26 +756,26 @@ int selfTest(const std::wstring& directory) {
     // Visual review sheet renders the production glyphs at Windows DPI scales;
     // kept out of the portable release, like the rest of this test fixture.
     {
-        Bitmap icons(1240, 280, PixelFormat32bppARGB);
+        Bitmap icons(1320, 280, PixelFormat32bppARGB);
         Graphics g(&icons);
         g.Clear(Color(255, 255, 255, 255));
-        const wchar_t* labels[] = {L"Select",  L"Arrow",  L"Text",        L"Rectangle", L"Line",
-                                   L"Counter", L"Brush",  L"Select text", L"Redact",    L"Undo",
-                                   L"Redo",    L"Delete", L"Copy",        L"Save"};
+        const wchar_t* labels[] = {L"Select",  L"Arrow", L"Text",        L"Rectangle", L"Line",
+                                   L"Counter", L"Brush", L"Select text", L"Redact",    L"Scan QR",
+                                   L"Undo",    L"Redo",  L"Delete",      L"Copy",      L"Save"};
         const wchar_t* scales[] = {L"100 %", L"150 %", L"200 %"};
-        for (int i = 0; i < 14; i++)
+        for (int i = 0; i < 15; i++)
             drawText(g, labels[i], {80.f + i * 80, 12, 80, 28}, 10, Muted, false, true);
         for (int row = 0; row < 3; row++) {
             REAL size = 24.f + 12 * row, y = 58.f + row * 72;
             drawText(g, scales[row], {0, y, 75, size}, 11, Muted, false, true);
-            for (int i = 0; i < 14; i++) {
+            for (int i = 0; i < 15; i++) {
                 RectF r(80.f + i * 80 + (80 - size) / 2, y, size, size);
                 if (i < ToolCount)
                     toolIcon(g, static_cast<Tool>(i), r, Ink);
-                else if (i < 11)
-                    historyIcon(g, r, i == 10, Ink);
+                else if (i < 12)
+                    historyIcon(g, r, i == 11, Ink);
                 else
-                    actionIcon(g, r, i == 11 ? 240 : (i == 12 ? 4 : 5), Ink);
+                    actionIcon(g, r, i == 12 ? 240 : (i == 13 ? 4 : 5), Ink);
             }
         }
         encodePng(icons, (directory + L"\\icons.png").c_str());
@@ -790,11 +791,11 @@ int selfTest(const std::wstring& directory) {
         return PointF(r.X + r.Width / 2, r.Y + r.Height / 2);
     };
     bool oneRow = true;
-    for (int id : {100, 101, 102, 103, 104, 105, 106, 107, 108, 2, 3, 240, 4, 5})
+    for (int id : {100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 2, 3, 240, 4, 5})
         if (std::abs(controlRect(id).Y - controlRect(100).Y) > 0.01f)
             oneRow = false;
-    check(oneRow && controlRect(2).X - controlRect(108).GetRight() > 10 * app.layout.scale,
-          L"Nine icon tools and history actions share a single spaced toolbar row");
+    check(oneRow && controlRect(2).X - controlRect(109).GetRight() > 10 * app.layout.scale,
+          L"Ten icon tools and history actions share a single spaced toolbar row");
     bool removed = true;
     for (int id : {1, 212, 220, 221, 250, 251, 252, 253})
         if (controlRect(id).Width > 0)
@@ -2050,6 +2051,7 @@ int selfTest(const std::wstring& directory) {
     testNavigationBounds(check);
     testOcr(directory, check);
     testRedaction(directory, check);
+    testQr(directory, check);
     log += L"\r\n" + std::to_wstring(checks) + L" checks, " + std::to_wstring(failures) +
            L" failures\r\n";
     FILE* file = nullptr;

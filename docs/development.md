@@ -33,6 +33,8 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `src/capture_shortcut.h`: shortcut validation, display, atomic preference storage, and registration replacement.
 - `src/ocr.h`, `src/ocr.cpp`: cancellable background Windows OCR and measurement, with immutable bitmap snapshots and plain text/geometry results.
 - `src/redaction.h`, `src/redaction.cpp`: regional Gaussian blur, area-averaged pixelation, and color/font-size estimation for Lorem substitution.
+- `src/qr.h`, `src/qr.cpp`: synchronous regional QR decoding over the original bitmap, link detection, and quadrilateral hit testing on top of the vendored decoder.
+- `src/quirc/`: unmodified [quirc](https://github.com/dlbeer/quirc) 1.0 sources (ISC license, see `src/quirc/LICENSE`). `build.ps1` compiles them as C at `/W3` and links the objects into the single executable.
 - `src/resource.h`: native dialog control identifiers.
 - `src/app.rc`, `src/app.manifest`: version and Windows application resources.
 - `tests/integration.inc`: native integration suite included only in test builds.
@@ -42,6 +44,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `tests/navigation_bounds.inc`: actual scroll and drag boundary behavior for smaller, larger, cropped, and expanded frames, including reversal, zoom, and window resize.
 - `tests/ocr.inc`: text geometry, Unicode clipboard hooks, cancellation, retained-desktop selection, and real Windows OCR on synthetic screenshots. Writes `ocr-editor.png` and `ocr-benchmark.txt`.
 - `tests/redaction.inc`: exact clipping, partial glyphs, color estimates, opacity, pixel averages, editing/history, dependent annotations, protected OCR copying, real OCR on substituted pixels, preview/export quality, and shutdown. Writes redaction previews and `redaction-performance.txt`.
+- `tests/qr.inc`: link detection rules, drag and click scanning on synthetic QR pixels, copy and Ctrl + click hooks, hit testing, cancellation, zoom, and export isolation. Writes `qr-editor.png`.
 - `docs/assets`: synthetic screenshots used in the product README.
 - `build.ps1`, `test.ps1`: build and verification entry points.
 
@@ -64,6 +67,12 @@ Select text draws overlays only in the current visible frame. Selection uses wor
 Wall time uses QueryPerformanceCounter and includes snapshot preparation and any worker queue delay. Recognition time sums the async API waits. Lorem preparation is timed separately and included in total elapsed and process CPU measurements. GetProcessTimes measures CPU for the **whole process**, not an isolated OCR thread; divide CPU time by elapsed time and logical processor count for average Task Manager-style CPU percentage. Working set is sampled during recognition, including the pre-job baseline; reported growth is relative to that baseline. These are diagnostic process metrics and can include concurrent rendering or previous recognition. CPU counters have finite granularity and RAM samples can miss short peaks. Screenshots, recognized text, and metrics are not automatically persisted or sent anywhere.
 
 No OCR model is bundled or installed. The engine uses the user's Windows OCR languages and falls back to the first available language. Missing languages or API failures produce an inline unavailable/error state. The standalone unpackaged probe and integration tests work on the local Windows 11 host with `en-US`; this does not establish compatibility with every supported Windows build. See `examples/windows-ocr` for the minimal probe.
+
+## QR scan
+
+Scan QR reads the original retained desktop bitmap, without annotations, for the dragged rectangle (clipped to the bitmap) or, on a plain click, for the current visible frame. Decoding runs synchronously on the UI thread: the region is converted to 8-bit luma, padded with a white quiet zone, and upscaled by nearest neighbor until its longer side reaches 400 pixels so small on-screen codes keep several pixels per module. Mirrored codes are retried after `quirc_flip`. Payloads honor the ECI code page when present; otherwise valid UTF-8 is preferred and Latin-1 is the fallback, matching common generators and the standard default.
+
+Results live in `AppState` as image-space quadrilaterals, never as annotations, so they do not touch undo history or exports. Only `http://`, `https://`, and bare `www.` payloads count as links; Ctrl + click opens those with `ShellExecuteW` and copies everything else, so a decoded `file:` or custom scheme can never launch a handler. Tests replace the clipboard and shell with `testCopiedText` and `testOpenedUrl` hooks and drive Ctrl through `testCtrlPressed`.
 
 ## Redaction preview
 

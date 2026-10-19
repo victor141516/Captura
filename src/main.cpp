@@ -23,6 +23,7 @@
 #include "resource.h"
 #include "capture_shortcut.h"
 #include "ocr.h"
+#include "qr.h"
 #include "redaction.h"
 #include "startup.h"
 
@@ -38,8 +39,19 @@ const Color Ink(255, 35, 43, 55), Muted(255, 103, 114, 130), Blue(255, 0, 110, 2
 const std::array<ARGB, 11> Swatches = {0xffef3e42, 0xfff28c28, 0xffffd23f, 0xff16a765,
                                        0xff087cf0, 0xff8752d6, 0xffec70a5, 0xff202833,
                                        0xffffffff, 0xff758294, 0xff00bcd4};
-enum class Tool { Select, Arrow, Text, Rectangle, Line, Counter, Brush, TextSelect, Redact };
-constexpr int ToolCount = 9;
+enum class Tool {
+    Select,
+    Arrow,
+    Text,
+    Rectangle,
+    Line,
+    Counter,
+    Brush,
+    TextSelect,
+    Redact,
+    QrScan
+};
+constexpr int ToolCount = 10;
 struct Style {
     ARGB color = 0xffef3e42, fill = 0xffef3e42;
     bool filled = false;
@@ -128,6 +140,12 @@ struct AppState {
     PointF textStart{};
     RectF textArea{};
     std::wstring textFeedback;
+    bool scanningQr = false, hasQrArea = false;
+    PointF qrStart{};
+    RectF qrArea{};
+    std::vector<captura::QrCode> qrCodes;
+    std::wstring qrFeedback;
+    int pressedQr = -1;
 #ifdef CAPTURA_TEST
     bool shortcutPreview = false;
     bool testAutoOcr = false;
@@ -193,6 +211,12 @@ void startOcr() {
 #endif
     if (app.image)
         app.ocr = ocrService.start(*app.image, app.main, OcrMessage);
+}
+void resetQr() {
+    app.scanningQr = app.hasQrArea = false;
+    app.pressedQr = -1;
+    app.qrCodes.clear();
+    app.qrFeedback.clear();
 }
 
 std::wstring captureHint() {
@@ -382,12 +406,12 @@ RECT canvasBounds() {
                      : RECT{};
 }
 #ifdef CAPTURA_TEST
-bool testShiftPressed = false;
+bool testShiftPressed = false, testCtrlPressed = false;
 #endif
 bool keyPressed(int key) {
 #ifdef CAPTURA_TEST
     if (app.test)
-        return key == VK_SHIFT && testShiftPressed;
+        return (key == VK_SHIFT && testShiftPressed) || (key == VK_CONTROL && testCtrlPressed);
 #endif
     return !app.test && (GetKeyState(key) & 0x8000) != 0;
 }
@@ -1346,6 +1370,16 @@ void toolIcon(Graphics& g, Tool tool, RectF r, Color color) {
         bristles.AddBezier(3.f, 19.f, 7.f, 22.f, 13.f, 21.f, 15.f, 17.f);
         bristles.AddBezier(15.f, 17.f, 16.f, 15.f, 15.f, 15.f, 14.f, 14.f);
         g.DrawPath(&pen, &bristles);
+    } else if (tool == Tool::QrScan) {
+        // Three finder patterns plus a few data modules.
+        SolidBrush tile(color);
+        for (PointF origin : {PointF{3, 3}, PointF{14, 3}, PointF{3, 14}}) {
+            g.DrawRectangle(&pen, origin.X + 1, origin.Y + 1, 5.f, 5.f);
+            g.FillRectangle(&tile, origin.X + 3, origin.Y + 3, 1.f, 1.f);
+        }
+        for (PointF cell : {PointF{14, 14}, PointF{18, 14}, PointF{16, 16}, PointF{14, 18},
+                            PointF{18, 18}, PointF{20, 16}, PointF{16, 20}, PointF{20, 20}})
+            g.FillRectangle(&tile, cell.X, cell.Y, 2.f, 2.f);
     }
     g.Restore(saved);
 }
@@ -1844,6 +1878,62 @@ void drawOcrPanel(Graphics& g, REAL x, REAL y, REAL width, REAL scale) {
                   {x, y + 160 * scale, width, 64 * scale}, 10 * scale, Muted);
     }
 }
+void drawQrOverlay(Graphics& g, const Layout& l) {
+    if (app.tool != Tool::QrScan || !app.image)
+        return;
+    GraphicsState saved = g.Save();
+    g.SetClip(l.canvas);
+    g.TranslateTransform(l.imageX, l.imageY);
+    g.ScaleTransform(l.zoom, l.zoom);
+    RECT frame = canvasBounds();
+    g.SetClip(RectF(float(frame.left), float(frame.top), float(frame.right - frame.left),
+                    float(frame.bottom - frame.top)),
+              CombineModeIntersect);
+    SolidBrush found(Color(45, 0, 110, 235)), link(Color(45, 22, 167, 101));
+    Pen edge(Blue, 2 / l.zoom), linkEdge(Color(255, 22, 167, 101), 2 / l.zoom);
+    for (const auto& code : app.qrCodes) {
+        bool isLink = !code.url.empty();
+        g.FillPolygon(isLink ? &link : &found, code.corners.data(), 4);
+        g.DrawPolygon(isLink ? &linkEdge : &edge, code.corners.data(), 4);
+    }
+    if (app.hasQrArea) {
+        SolidBrush area(Color(20, 0, 110, 235));
+        Pen border(Blue, 1.5f / l.zoom);
+        border.SetDashStyle(DashStyleDash);
+        g.FillRectangle(&area, app.qrArea);
+        g.DrawRectangle(&border, app.qrArea);
+    }
+    g.Restore(saved);
+}
+void drawQrPanel(Graphics& g, REAL x, REAL y, REAL width, REAL scale) {
+    auto paragraph = [&](const std::wstring& text, RectF rect, REAL size, Color color) {
+        Font font(L"Segoe UI", size, FontStyleRegular, UnitPixel);
+        SolidBrush ink(color);
+        StringFormat format;
+        format.SetTrimming(StringTrimmingEllipsisCharacter);
+        g.DrawString(text.c_str(), -1, &font, rect, &format, &ink);
+    };
+    drawText(g, L"Scan QR", {x, y, width, 26 * scale}, 14 * scale, Ink, true);
+    y += 38 * scale;
+    paragraph(app.image ? L"Drag around a QR code, or click the image to scan the visible frame."
+                        : L"Capture an image to begin.",
+              {x, y, width, 56 * scale}, 12 * scale, Muted);
+    y += 62 * scale;
+    paragraph(L"Click a found code to copy its content. Ctrl + click opens web links.",
+              {x, y, width, 56 * scale}, 12 * scale, Muted);
+    y += 66 * scale;
+    if (!app.qrFeedback.empty()) {
+        paragraph(app.qrFeedback, {x, y, width, 36 * scale}, 12 * scale, Blue);
+        y += 46 * scale;
+    }
+    for (const auto& code : app.qrCodes) {
+        paragraph(code.url.empty() ? L"Text" : L"Link", {x, y, width, 18 * scale}, 11 * scale,
+                  Muted);
+        y += 18 * scale;
+        paragraph(code.text, {x, y, width, 54 * scale}, 12 * scale, Ink);
+        y += 62 * scale;
+    }
+}
 void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true,
                   bool cachedCapture = false, bool chromeOnly = false) {
     app.layout = calculateLayout(hwnd);
@@ -1889,6 +1979,7 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
                 drawSelection(g, l);
                 drawCanvasHandles(g, l);
                 drawOcrOverlay(g, l);
+                drawQrOverlay(g, l);
             }
         }
     } else {
@@ -1904,6 +1995,8 @@ void renderEditor(Graphics& g, HWND hwnd, int before = -1, bool selection = true
     Style st = activeStyle();
     if (app.tool == Tool::TextSelect) {
         drawOcrPanel(g, px, y, pw, s);
+    } else if (app.tool == Tool::QrScan) {
+        drawQrPanel(g, px, y, pw, s);
     } else {
         if (t == Tool::Redact) {
             const auto* recognition = ocrReport();
@@ -2073,6 +2166,7 @@ int testSaveDialogs = 0;
 int testExportCompletions = 0;
 bool testClipboardSuccess = true;
 std::wstring testCopiedText;
+std::wstring testOpenedUrl;
 #endif
 void exportComplete() {
 #ifdef CAPTURA_TEST
@@ -2266,6 +2360,43 @@ HGLOBAL makeDib(Bitmap& bitmap) {
     GlobalUnlock(memory);
     return memory;
 }
+bool copyText(const std::wstring& text) {
+    bool copied = false;
+#ifdef CAPTURA_TEST
+    if (app.test) {
+        copied = testClipboardSuccess;
+        if (copied)
+            testCopiedText = text;
+    } else
+#endif
+    {
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+        if (memory) {
+            void* bytes = GlobalLock(memory);
+            if (bytes) {
+                memcpy(bytes, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+                GlobalUnlock(memory);
+                if (OpenClipboard(app.main)) {
+                    copied = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory);
+                    CloseClipboard();
+                }
+            }
+            if (!copied)
+                GlobalFree(memory);
+        }
+    }
+    return copied;
+}
+bool openUrl(const std::wstring& url) {
+#ifdef CAPTURA_TEST
+    if (app.test) {
+        testOpenedUrl = url;
+        return true;
+    }
+#endif
+    return reinterpret_cast<INT_PTR>(
+               ShellExecuteW(app.main, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
 void copySelectedText() {
     if (!ocrReady()) {
         app.textFeedback = L"Text is not ready yet.";
@@ -2298,31 +2429,52 @@ void copySelectedText() {
         invalidate();
         return;
     }
-    bool copied = false;
-#ifdef CAPTURA_TEST
-    if (app.test) {
-        copied = testClipboardSuccess;
-        if (copied)
-            testCopiedText = text;
-    } else
-#endif
-    {
-        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
-        if (memory) {
-            void* bytes = GlobalLock(memory);
-            if (bytes) {
-                memcpy(bytes, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
-                GlobalUnlock(memory);
-                if (OpenClipboard(app.main)) {
-                    copied = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory);
-                    CloseClipboard();
-                }
-            }
-            if (!copied)
-                GlobalFree(memory);
-        }
+    app.textFeedback =
+        copyText(text) ? L"Text copied to clipboard." : L"Could not copy text. Try Ctrl+C.";
+    invalidate();
+}
+int qrAt(PointF image) {
+    for (int index = 0; index < static_cast<int>(app.qrCodes.size()); ++index)
+        if (captura::qrContains(app.qrCodes[index], image))
+            return index;
+    return -1;
+}
+void scanQrArea() {
+    RECT frame = canvasBounds();
+    RectF area = app.qrArea;
+    if (area.Width < 2 && area.Height < 2) {
+        // A plain click scans the whole visible frame.
+        area = {float(frame.left), float(frame.top), float(frame.right - frame.left),
+                float(frame.bottom - frame.top)};
+        app.hasQrArea = false;
     }
-    app.textFeedback = copied ? L"Text copied to clipboard." : L"Could not copy text. Try Ctrl+C.";
+    Rect region(static_cast<INT>(std::floor(area.X)), static_cast<INT>(std::floor(area.Y)),
+                static_cast<INT>(std::ceil(area.GetRight())) - static_cast<INT>(std::floor(area.X)),
+                static_cast<INT>(std::ceil(area.GetBottom())) -
+                    static_cast<INT>(std::floor(area.Y)));
+    app.qrCodes = captura::scanQrCodes(*app.image, region);
+    size_t links = 0;
+    for (const auto& code : app.qrCodes)
+        links += !code.url.empty();
+    if (app.qrCodes.empty())
+        app.qrFeedback = L"No QR code found. Try a larger area around the code.";
+    else
+        app.qrFeedback = std::to_wstring(app.qrCodes.size()) +
+                         (app.qrCodes.size() == 1 ? L" QR code found" : L" QR codes found") +
+                         (links ? L". Click to copy; Ctrl + click opens the link."
+                                : L". Click to copy its content.");
+    invalidate();
+}
+void activateQr(int index, bool ctrl) {
+    const captura::QrCode& code = app.qrCodes[index];
+    if (ctrl && !code.url.empty()) {
+        app.qrFeedback = openUrl(code.url) ? L"Link opened in the browser."
+                                           : L"Could not open the link. Click copies it instead.";
+    } else {
+        app.qrFeedback = copyText(code.text) ? (code.url.empty() ? L"Text copied to clipboard."
+                                                                 : L"Link copied to clipboard.")
+                                             : L"Could not copy. Try again.";
+    }
     invalidate();
 }
 void copyImage() {
@@ -2454,6 +2606,8 @@ void chooseColor() {
 void setTool(Tool tool) {
     commitText();
     app.selectingText = false;
+    app.scanningQr = app.hasQrArea = false;
+    app.pressedQr = -1;
     if (GetCapture() == app.main && !app.dragging && !app.panning && !app.resizingCanvas)
         ReleaseCapture();
     app.tool = tool;
@@ -2759,6 +2913,21 @@ void mouseDown(PointF screen) {
         invalidate();
         return;
     }
+    if (app.tool == Tool::QrScan) {
+        app.selected = -1;
+        int index = qrAt(p);
+        if (index >= 0) {
+            app.pressedQr = index;
+        } else {
+            app.qrStart = p;
+            app.qrArea = {p.X, p.Y, 0, 0};
+            app.scanningQr = app.hasQrArea = true;
+            app.qrFeedback.clear();
+        }
+        SetCapture(app.main);
+        invalidate();
+        return;
+    }
     if (app.tool == Tool::Redact) {
         p = {std::round(p.X), std::round(p.Y)};
         if (app.defaults[static_cast<int>(Tool::Redact)].redaction >= 2 && !loremReady()) {
@@ -2891,6 +3060,13 @@ void mouseMove(PointF screen) {
             UpdateWindow(app.main);
         return;
     }
+    if (app.scanningQr) {
+        app.qrArea = normalized(app.qrStart, toImage(screen));
+        invalidate();
+        if (!app.test && IsWindowVisible(app.main))
+            UpdateWindow(app.main);
+        return;
+    }
     if (!app.trackingMouse) {
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, app.main, 0};
         TrackMouseEvent(&track);
@@ -3018,6 +3194,8 @@ void mouseMove(PointF screen) {
 }
 void mouseUp() {
     app.selectingText = false;
+    app.scanningQr = false;
+    app.pressedQr = -1;
     if (app.resizingCanvas) {
         RECT frame = canvasBounds();
         for (Item& item : app.items) {
@@ -3070,6 +3248,19 @@ void releasePointer(PointF screen) {
         }
         mouseUp();
         copySelectedText();
+        return;
+    }
+    if (app.scanningQr) {
+        mouseMove(screen);
+        mouseUp();
+        scanQrArea();
+        return;
+    }
+    if (app.pressedQr >= 0) {
+        int index = app.pressedQr;
+        mouseUp();
+        if (index < static_cast<int>(app.qrCodes.size()) && qrAt(toImage(screen)) == index)
+            activateQr(index, keyPressed(VK_CONTROL));
         return;
     }
     if (app.pressedButton >= 0) {
@@ -3211,6 +3402,7 @@ void finishCapture(RECT r) {
     app.tool = Tool::Arrow;
     app.status = ui::kCaptureReady;
     startOcr();
+    resetQr();
     if (!app.test) {
         ShowWindow(app.main, SW_RESTORE);
         SetForegroundWindow(app.main);
@@ -3539,6 +3731,7 @@ void paint(HWND hwnd, bool overlay, HDC supplied = nullptr) {
             drawSelection(g, layout);
             drawCanvasHandles(g, layout);
             drawOcrOverlay(g, layout);
+            drawQrOverlay(g, layout);
         } else {
             Graphics g(buffer.dc);
             g.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -3973,6 +4166,13 @@ void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPre
             app.textFeedback.clear();
             return;
         }
+        if (app.scanningQr ||
+            (app.tool == Tool::QrScan && (app.hasQrArea || !app.qrCodes.empty()))) {
+            mouseUp();
+            resetQr();
+            invalidate();
+            return;
+        }
         if (app.resizingCanvas) {
             mouseUp();
             undo(false);
@@ -4048,6 +4248,9 @@ void keyDown(WPARAM key, bool ctrl = keyPressed(VK_CONTROL), bool shift = keyPre
         break;
     case 'O':
         setTool(Tool::TextSelect);
+        break;
+    case 'Q':
+        setTool(Tool::QrScan);
         break;
     case 'B':
         setTool(Tool::Redact);
@@ -4127,7 +4330,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_MBUTTONDOWN:
-        if (app.selectingText)
+        if (app.selectingText || app.scanningQr)
             return 0;
         if (contains(app.layout.canvas,
                      {static_cast<REAL>(GET_X_LPARAM(l)), static_cast<REAL>(GET_Y_LPARAM(l))})) {
@@ -4142,8 +4345,10 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         mouseUp();
         return 0;
     case WM_CAPTURECHANGED:
-        if (app.selectingText) {
+        if (app.selectingText || app.scanningQr || app.pressedQr >= 0) {
             app.selectingText = app.hasTextSelection = false;
+            app.scanningQr = app.hasQrArea = false;
+            app.pressedQr = -1;
             invalidate();
         }
         if (app.dragging || app.panning || app.sizing || app.pressedButton >= 0 ||
@@ -4170,22 +4375,22 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             POINT cursor;
             GetCursorPos(&cursor);
             ScreenToClient(hwnd, &cursor);
-            int handle =
-                app.resizingCanvas
-                    ? app.canvasHandle
-                    : canvasHandleAt({static_cast<REAL>(cursor.x), static_cast<REAL>(cursor.y)});
-            SetCursor(LoadCursorW(
-                nullptr, handle >= 0 ? (handle == 0 || handle == 2 ? IDC_SIZENWSE : IDC_SIZENESW)
-                                     : (app.tool == Tool::TextSelect &&
-                                                onImage({float(cursor.x), float(cursor.y)})
-                                            ? IDC_CROSS
-                                            : IDC_ARROW)));
+            PointF point{static_cast<REAL>(cursor.x), static_cast<REAL>(cursor.y)};
+            int handle = app.resizingCanvas ? app.canvasHandle : canvasHandleAt(point);
+            LPCWSTR shape = IDC_ARROW;
+            if (handle >= 0)
+                shape = handle == 0 || handle == 2 ? IDC_SIZENWSE : IDC_SIZENESW;
+            else if (app.tool == Tool::QrScan && onImage(point))
+                shape = qrAt(toImage(point)) >= 0 ? IDC_HAND : IDC_CROSS;
+            else if (app.tool == Tool::TextSelect && onImage(point))
+                shape = IDC_CROSS;
+            SetCursor(LoadCursorW(nullptr, shape));
             return TRUE;
         }
         break;
     case WM_MOUSEWHEEL: {
-        if (app.selectingText) {
-            app.hasTextSelection = false;
+        if (app.selectingText || app.scanningQr) {
+            app.hasTextSelection = app.hasQrArea = false;
             mouseUp();
         }
         if (!app.image || app.edit)

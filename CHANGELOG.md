@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.20.0
+
+- Add the Scan QR tool (Q). Drag around a QR code or click the image to scan the visible frame; found codes are highlighted. Click copies the decoded content; Ctrl + click opens `http(s)` links in the browser and copies anything else. Overlays are never exported and leave undo history untouched.
+- Bundle the quirc QR decoder (ISC) as vendored C source compiled into the executable; no new DLLs or downloads.
+
 ## 1.19.1
 
 - Build with standard C++20 coroutines so native Windows OCR remains compatible with the newer MSVC toolchain on GitHub's Windows runner.
