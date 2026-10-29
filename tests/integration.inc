@@ -52,6 +52,7 @@ std::unique_ptr<Bitmap> fixture() {
 #include "ocr.inc"
 #include "redaction.inc"
 #include "qr.inc"
+#include "hdr.inc"
 void addFixtureItems() {
     app.canvas = {};
     app.pinnedCanvas = false;
@@ -2052,6 +2053,7 @@ int selfTest(const std::wstring& directory) {
     testOcr(directory, check);
     testRedaction(directory, check);
     testQr(directory, check);
+    testHdr(check);
     log += L"\r\n" + std::to_wstring(checks) + L" checks, " + std::to_wstring(failures) +
            L" failures\r\n";
     FILE* file = nullptr;

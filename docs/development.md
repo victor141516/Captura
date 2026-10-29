@@ -34,6 +34,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `src/ocr.h`, `src/ocr.cpp`: cancellable background Windows OCR and measurement, with immutable bitmap snapshots and plain text/geometry results.
 - `src/redaction.h`, `src/redaction.cpp`: regional Gaussian blur, area-averaged pixelation, and color/font-size estimation for Lorem substitution.
 - `src/qr.h`, `src/qr.cpp`: synchronous regional QR decoding over the original bitmap, link detection, and quadrilateral hit testing on top of the vendored decoder.
+- `src/hdr.h`, `src/hdr.cpp`: FP16 desktop duplication of HDR monitors and per-window conversion to SDR (BT.2390, hue-preserving).
 - `src/quirc/`: unmodified [quirc](https://github.com/dlbeer/quirc) 1.0 sources (ISC license, see `src/quirc/LICENSE`). `build.ps1` compiles them as C at `/W3` and links the objects into the single executable.
 - `src/resource.h`: native dialog control identifiers.
 - `src/app.rc`, `src/app.manifest`: version and Windows application resources.
@@ -45,6 +46,7 @@ For an interactive preview of the shortcut dialog, run the test executable with 
 - `tests/ocr.inc`: text geometry, Unicode clipboard hooks, cancellation, retained-desktop selection, and real Windows OCR on synthetic screenshots. Writes `ocr-editor.png` and `ocr-benchmark.txt`.
 - `tests/redaction.inc`: exact clipping, partial glyphs, color estimates, opacity, pixel averages, editing/history, dependent annotations, protected OCR copying, real OCR on substituted pixels, preview/export quality, and shutdown. Writes redaction previews and `redaction-performance.txt`.
 - `tests/qr.inc`: link detection rules, drag and click scanning on synthetic QR pixels, copy and Ctrl + click hooks, hit testing, cancellation, zoom, and export isolation. Writes `qr-editor.png`.
+- `tests/hdr.inc`: FP16 decoding, the tone curve, exact SDR reproduction, region bounds, hue and gamut handling, display-peak capping, and percentile peaks on synthetic scRGB buffers.
 - `docs/assets`: synthetic screenshots used in the product README.
 - `build.ps1`, `test.ps1`: build and verification entry points.
 
@@ -67,6 +69,16 @@ Select text draws overlays only in the current visible frame. Selection uses wor
 Wall time uses QueryPerformanceCounter and includes snapshot preparation and any worker queue delay. Recognition time sums the async API waits. Lorem preparation is timed separately and included in total elapsed and process CPU measurements. GetProcessTimes measures CPU for the **whole process**, not an isolated OCR thread; divide CPU time by elapsed time and logical processor count for average Task Manager-style CPU percentage. Working set is sampled during recognition, including the pre-job baseline; reported growth is relative to that baseline. These are diagnostic process metrics and can include concurrent rendering or previous recognition. CPU counters have finite granularity and RAM samples can miss short peaks. Screenshots, recognized text, and metrics are not automatically persisted or sent anywhere.
 
 No OCR model is bundled or installed. The engine uses the user's Windows OCR languages and falls back to the first available language. Missing languages or API failures produce an inline unavailable/error state. The standalone unpackaged probe and integration tests work on the local Windows 11 host with `en-US`; this does not establish compatibility with every supported Windows build. See `examples/windows-ocr` for the minimal probe.
+
+## HDR capture
+
+With HDR enabled, Windows composes the desktop in FP16 scRGB, where 1.0 is 80 nits. GDI screen capture encodes that composition with 1.0 as white. SDR windows come out right because Windows hands GDI their native pixels, but HDR content (games, HDR video) clips per channel above 80 nits: highlights burn and bright colors shift toward yellow and white. The Windows screenshot tools show the same artifact.
+
+`captureDesktop` keeps the GDI capture and then calls `convertHdrDesktop`. Each output whose color space is `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` is recaptured with `IDXGIOutput5::DuplicateOutput1` in `R16G16B16A16_FLOAT` and normalized by that monitor's SDR white level (`DISPLAYCONFIG_SDR_WHITE_LEVEL`), so the "SDR content brightness" setting is honored. SDR monitors, rotated HDR monitors, and any duplication failure keep the GDI pixels.
+
+A single global curve cannot keep both SDR windows at white and HDR highlights distinguishable, so conversion runs per visible top-level window region (front to back, plus the remaining desktop; click-through overlays are skipped). A region's peak is the 99.9th percentile of max RGB, capped at the display's `MaxLuminance`. If that peak is at or below SDR white, the region is encoded linearly; opaque SDR windows then reproduce the GDI bytes exactly. Brighter regions get the BT.2390 EETF in PQ space from their peak to SDR white: tones below the knee stay unchanged and highlights roll off. The curve scales all three channels by one max-RGB gain, so hue is preserved; negative (wide-gamut) components are desaturated toward luminance instead of clipped. Translucent windows over HDR content also use the duplicated composition, which matches the screen better than GDI's blend over clipped pixels.
+
+The first duplicated frame can be empty, and DWM produces a frame only when something changes. If no image arrives within 100 ms, an almost transparent 1-pixel layered window at the monitor corner forces one composition. The Direct3D device is cached for the session because creating it (loading the driver) costs about 130 ms. On a 4K HDR monitor, later captures add about 65 ms; per-pixel work is split across up to eight threads. `tests/hdr.inc` covers the conversion on synthetic FP16 buffers. Duplication itself needs HDR hardware and was verified manually.
 
 ## QR scan
 

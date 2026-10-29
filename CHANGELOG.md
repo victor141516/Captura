@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.21.0
+
+- Capture HDR monitors without burned colors. Windows' GDI capture clips HDR content above 80 nits; Captura now recaptures HDR monitors in FP16 through DXGI desktop duplication and converts each visible window separately, relative to the SDR content brightness setting. SDR windows keep their exact colors. Brighter content such as games and HDR video gets a BT.2390 highlight roll-off that preserves hue. Other monitors, and any failure, keep the previous capture.
+
 ## 1.20.0
 
 - Add the Scan QR tool (Q). Drag around a QR code or click the image to scan the visible frame; found codes are highlighted. Click copies the decoded content; Ctrl + click opens `http(s)` links in the browser and copies anything else. Overlays are never exported and leave undo history untouched.

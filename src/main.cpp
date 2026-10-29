@@ -22,6 +22,7 @@
 #include "ui_text.h"
 #include "resource.h"
 #include "capture_shortcut.h"
+#include "hdr.h"
 #include "ocr.h"
 #include "qr.h"
 #include "redaction.h"
@@ -3334,6 +3335,17 @@ std::unique_ptr<Bitmap> captureDesktop(RECT bounds) {
     DeleteObject(bitmap);
     if (result && result->GetLastStatus() != Ok)
         result.reset();
+    if (result) {
+        // GDI clips HDR content above 80 nits; HDR monitors are recaptured in FP16 and
+        // converted relative to their SDR white level. Failures keep the GDI pixels.
+        BitmapData pixels{};
+        Rect all(0, 0, w, h);
+        if (result->LockBits(&all, ImageLockModeRead | ImageLockModeWrite, PixelFormat32bppRGB,
+                             &pixels) == Ok) {
+            captura::convertHdrDesktop(static_cast<uint8_t*>(pixels.Scan0), pixels.Stride, bounds);
+            result->UnlockBits(&pixels);
+        }
+    }
     return result;
 }
 void hoverWindow(POINT p) {

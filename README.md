@@ -22,10 +22,11 @@ The editor closes after a successful image copy or save. Captura stays in your s
 
 ## Small app. Clear screenshots.
 
-- **One small executable.** Around 460 KiB. Download `Captura.exe` and run it. No installer, account, or internet connection required. Targets 64-bit Windows 10 and 11. Text recognition needs an available Windows OCR language; the native OCR integration has been verified on Windows 11.
+- **One small executable.** Around 490 KiB. Download `Captura.exe` and run it. No installer, account, or internet connection required. Targets 64-bit Windows 10 and 11. Text recognition needs an available Windows OCR language; the native OCR integration has been verified on Windows 11.
 - **Point precisely.** Bend arrows and lines by dragging their center diamond. Use one arrowhead or two. Number a sequence with counters; click and drag to add a pointer.
 - **Write clearly.** Text appears directly on the screenshot, with a rounded background and automatic black or white contrast. Use a shared color across your tools, or choose your own fill.
 - **Get the framing right.** Start with an area or a window, then drag the four corner squares to crop closer or reveal more of the surrounding desktop, captured at the same instant. Cropping stays reversible during the session.
+- **HDR screens without burned colors.** On HDR monitors, games and HDR video are converted with a highlight roll-off instead of being clipped, while ordinary windows keep their exact colors.
 - **Room for your point.** Draw past an edge and the canvas reveals the captured context. Beyond the full desktop, it adds a matching background. On release, unused automatic space is trimmed. Your chosen frame stays under your control.
 - **Easy to revise.** Move, resize, duplicate, undo, and redo. Copy and save include only the visible frame, with no selection handles.
 - **Hide just the area you choose.** Blur or pixelate a rectangle and adjust it with the same handles as your other annotations. Lorem modes substitute detected words before applying the effect; content outside the rectangle stays unchanged, even when its edge crosses a letter. Substitution depends on completed OCR and the text it detects.
